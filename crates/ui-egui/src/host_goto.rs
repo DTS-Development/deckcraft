@@ -194,4 +194,56 @@ mod tests {
         assert_eq!((t.cell, t.anchor, t.caret), (Some((1, 1)), (0, 0), (0, 5)));
         assert!(!st.selection.text.as_ref().unwrap().notes);
     }
+
+    /// The shared fixture: slide files are numbered differently from the presentation order, and
+    /// each probe says which paragraph the n-th match must be in.
+    #[test]
+    fn the_hosts_probes_point_at_the_same_paragraphs() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tag-jump");
+        let bytes = std::fs::read(format!("{dir}/jump.pptx")).unwrap();
+        let expected: serde_json::Value = serde_json::from_slice(&std::fs::read(format!("{dir}/expected.json")).unwrap()).unwrap();
+        let doc = deckcraft_engine::cmd::file::open_presentation("jump.pptx", &bytes).unwrap();
+        let para_text = |f: &Found, slide: usize| -> String {
+            let mut texts = vec![];
+            fn collect(shapes: &[Shape], out: &mut Vec<(ShapeId, Option<(usize, usize)>, TextBody)>) {
+                for sh in shapes {
+                    out.extend(sh.text.clone().map(|t| (sh.id, None, t)));
+                    match &sh.kind {
+                        ShapeKind::Table(t) => {
+                            for (r, row) in t.rows.iter().enumerate() {
+                                out.extend(row.cells.iter().enumerate().map(|(c, x)| (sh.id, Some((r, c)), x.text.clone())));
+                            }
+                        }
+                        ShapeKind::Group { children, .. } => collect(children, out),
+                        _ => {}
+                    }
+                }
+            }
+            collect(&doc.slides[slide - 1].shapes, &mut texts);
+            let (_, _, body) = texts.iter().find(|(id, cell, _)| *id == f.shape && *cell == f.cell).unwrap();
+            body.paragraphs[f.para].text()
+        };
+        let probes = expected["pptx"]["probes"].as_array().unwrap();
+        assert!(!probes.is_empty());
+        for probe in probes {
+            let l = &probe["location"];
+            let (slide, text, n) = (l["slide"].as_u64().unwrap() as usize, l["text"].as_str().unwrap(), l["occurrence"].as_u64().unwrap() as usize);
+            let f = locate(&doc, slide, text, n).unwrap_or_else(|e| panic!("{l}: {e:?}"));
+            assert_eq!(para_text(&f, slide), probe["paragraph"].as_str().unwrap(), "{l}");
+            // The match is where the host says: the slice at the range is the text itself.
+            let chars: Vec<char> = para_text(&f, slide).chars().collect();
+            assert_eq!(chars[f.start..f.end].iter().collect::<String>(), text);
+        }
+        // One past the last occurrence is not found, so a stale count can't land on a neighbour.
+        assert_eq!(locate(&doc, 2, "{{name}}", 5), Err(Reason::NotFound));
+        // Error and warning locations of the fixture all resolve.
+        for item in ["errors", "warnings"] {
+            for e in expected["pptx"][item].as_array().unwrap() {
+                let l = &e["location"];
+                let (slide, text, n) =
+                    (l["slide"].as_u64().unwrap() as usize, l["text"].as_str().unwrap(), l["occurrence"].as_u64().unwrap() as usize);
+                assert!(locate(&doc, slide, text, n).is_ok(), "{l}");
+            }
+        }
+    }
 }
