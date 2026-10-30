@@ -1,21 +1,22 @@
 {
-  "_doc": "jump.docx/.xlsx/.pptx의 기대 위치. 손으로 계산했다(서버 코드가 만든 값이 아님). 규약은 tagjump_spec.md 2절: 문단 글자 = run 글자를 이어 붙인 것(탭 \\t, 줄바꿈 \\n), occurrence = 범위 안 문단들을 순서대로 보며 text의 겹치지 않는 부분 문자열 일치를 센 순번(1부터). 텍스트 상자 안 문단은 세지 않는다. scopes는 범위별로 세는 문단 목록이다. data는 검사할 때 template_data로 넣는 값이다. errors/warnings는 서버 검사 결과에 있어야 하는 항목, probes는 포크가 그 위치를 선택했을 때 선택이 들어 있어야 하는 문단이다.",
+  "_doc": "jump.docx/.xlsx/.pptx의 기대 위치. 손으로 계산했다(서버 코드가 만든 값이 아님). 규약은 tagjump_spec.md 2절: 문단 글자 = run 글자를 이어 붙인 것(탭 \\t, 줄바꿈 \\n, 필드·인라인 그림/개체는 U+FFFC 한 글자), occurrence = 범위 안 문단들을 순서대로 보며 text의 겹치지 않는 부분 문자열 일치를 센 순번(1부터). 텍스트 상자 안 문단은 세지 않는다. scopes는 범위별로 세는 문단 목록이다. data는 검사할 때 template_data로 넣는 값이다. errors/warnings는 서버 검사 결과에 있어야 하는 항목, probes는 포크가 그 위치를 선택했을 때 선택이 들어 있어야 하는 문단이다.",
   "docx": {
     "data": { "title": "T", "page": "1", "items": [{ "sku": "A" }] },
     "scopes": {
       "body": [
         "Title {{title}}",
         "Hello {{name}} and {{ name }}",
-        "Box ",
+        "Box \uFFFC",
         "{{name}}",
         "{{loop items}}{{sku}}",
         "{{qty}}{{endloop}}",
         "{{nmae}}",
         "Split {{name}}",
+        "Field \uFFFC {{name}}",
         "Stray end}}",
         "Open {{broken tag"
       ],
-      "header": ["Header {{name}}"],
+      "header": ["Header two {{name}}", "Header one {{name}}"],
       "footer": ["Footer {{page}} {{name}}"]
     },
     "errors": [
@@ -34,7 +35,9 @@
       { "location": { "kind": "docx", "story": "body", "text": "{{ name }}", "occurrence": 1 }, "paragraph": "Hello {{name}} and {{ name }}" },
       { "location": { "kind": "docx", "story": "body", "text": "{{loop items}}", "occurrence": 1 }, "paragraph": "{{loop items}}{{sku}}" },
       { "location": { "kind": "docx", "story": "body", "text": "{{endloop}}", "occurrence": 1 }, "paragraph": "{{qty}}{{endloop}}" },
-      { "location": { "kind": "docx", "story": "header", "text": "{{name}}", "occurrence": 1 }, "paragraph": "Header {{name}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 4 }, "paragraph": "Field \uFFFC {{name}}" },
+      { "location": { "kind": "docx", "story": "header", "text": "{{name}}", "occurrence": 1 }, "paragraph": "Header two {{name}}" },
+      { "location": { "kind": "docx", "story": "header", "text": "{{name}}", "occurrence": 2 }, "paragraph": "Header one {{name}}" },
       { "location": { "kind": "docx", "story": "footer", "text": "{{page}}", "occurrence": 1 }, "paragraph": "Footer {{page}} {{name}}" },
       { "location": { "kind": "docx", "story": "footer", "text": "{{name}}", "occurrence": 1 }, "paragraph": "Footer {{page}} {{name}}" }
     ]
