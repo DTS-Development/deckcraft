@@ -21,15 +21,15 @@
 //!   presentation open).
 //!
 //! - `deckcraft:goto` (from the parent): `{ id, location }`, location `{ kind: "pptx", slide, text,
-//!   occurrence, total? }`: slide and occurrence count from 1, slides in presentation order.
-//!   With `total`, the slide must hold exactly that many matches or the answer is `not-found`.
-//!   Past 16 waiting jumps the oldest is answered `error` and dropped. It opens that
-//!   slide and selects the `occurrence`-th match of `text` on it (shapes in shape-tree order,
-//!   groups expanded, tables row by row; speaker notes left out), ready to edit.
+//!   occurrence, total? }`: slide and occurrence count from 1, slides in presentation order. It
+//!   opens that slide and selects the `occurrence`-th match of `text` on it (shapes in shape-tree
+//!   order, groups expanded, tables row by row; speaker notes left out), ready to edit. With
+//!   `total`, the slide must hold exactly that many matches or nothing is selected and the answer
+//!   is `not-found`. Past 16 waiting jumps the oldest is answered `error` and dropped.
 //! - `deckcraft:goto-done` (to the parent): `{ id }` when it did.
 //! - `deckcraft:goto-failed` (to the parent): `{ id, reason }`, reason `"not-found"` (no such
-//!   slide or match, no presentation open yet), `"unsupported"` (a location of another kind) or `"error"` (a malformed
-//!   request).
+//!   slide or match, no presentation open yet), `"unsupported"` (a location of another kind) or
+//!   `"error"` (a malformed request).
 //!
 //! - `deckcraft:request-bytes` (from the parent): `{ id, purpose }`, purpose `"save"`, `"check"` or
 //!   `"preview"`. It asks for the presentation as it is now, as a `.pptx`.
@@ -451,7 +451,7 @@ impl Bridge {
     }
 }
 
-/// `location` as `(slide, text, occurrence)`; `"unsupported"` for another kind of location,
+/// `location` as `(slide, text, occurrence, total)`, `total` only if sent; `"unsupported"` for another kind of location,
 /// `"error"` for a pptx one that can't be used.
 fn goto_target(data: &JsValue) -> Result<(usize, String, usize, Option<usize>), &'static str> {
     let location = js_sys::Reflect::get(data, &JsValue::from_str("location")).map_err(|_| "error")?;
