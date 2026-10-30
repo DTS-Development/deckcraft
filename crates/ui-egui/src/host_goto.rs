@@ -103,22 +103,31 @@ fn walk(shapes: &[Shape], pat: &[char], left: &mut usize, depth: usize) -> Optio
 }
 
 /// The `occurrence`-th (from 1) match of `text` on `slide` (from 1, presentation order).
-pub fn locate(doc: &Presentation, slide: usize, text: &str, occurrence: usize) -> Result<Found, Reason> {
+/// With `total`, the slide must hold exactly that many matches, or nothing is found: the
+/// presentation has changed since the host counted.
+pub fn locate(doc: &Presentation, slide: usize, text: &str, occurrence: usize, total: Option<usize>) -> Result<Found, Reason> {
     let pat: Vec<char> = text.chars().collect();
     if pat.is_empty() || pat.len() > MAX_TEXT_CHARS || slide == 0 || occurrence == 0 {
         return Err(Reason::Error);
     }
     let sl = doc.slides.get(slide - 1).ok_or(Reason::NotFound)?;
+    if let Some(total) = total {
+        let mut left = usize::MAX;
+        let _ = walk(&sl.shapes, &pat, &mut left, 0);
+        if usize::MAX - left != total {
+            return Err(Reason::NotFound);
+        }
+    }
     let mut left = occurrence;
     walk(&sl.shapes, &pat, &mut left, 0).ok_or(Reason::NotFound)
 }
 
 /// Open the slide and select the match, editing its text. An `Err` leaves the selection wherever
 /// it got to, but the presentation itself is never changed.
-pub fn goto(app: &mut SlideApp, slide: usize, text: &str, occurrence: usize) -> Result<(), Reason> {
+pub fn goto(app: &mut SlideApp, slide: usize, text: &str, occurrence: usize, total: Option<usize>) -> Result<(), Reason> {
     let found = {
         let st = app.session.doc().map_err(|_| Reason::Error)?;
-        locate(&st.doc, slide, text, occurrence)?
+        locate(&st.doc, slide, text, occurrence, total)?
     };
     let fail = |e: String| {
         log::warn!("goto: {e}");
@@ -155,14 +164,24 @@ mod tests {
     fn bad_requests_are_errors_and_missing_ones_not_found() {
         let mut a = app();
         let doc = a.session.doc().unwrap().doc.clone();
-        assert_eq!(locate(&doc, 0, "x", 1), Err(Reason::Error));
-        assert_eq!(locate(&doc, 1, "", 1), Err(Reason::Error));
-        assert_eq!(locate(&doc, 1, "x", 0), Err(Reason::Error));
-        assert_eq!(locate(&doc, 99, "x", 1), Err(Reason::NotFound));
-        assert_eq!(locate(&doc, 1, "{{nope}}", 1), Err(Reason::NotFound));
-        assert_eq!(goto(&mut a, 1, "{{nope}}", 1), Err(Reason::NotFound));
+        assert_eq!(locate(&doc, 0, "x", 1, None), Err(Reason::Error));
+        assert_eq!(locate(&doc, 1, "", 1, None), Err(Reason::Error));
+        assert_eq!(locate(&doc, 1, "x", 0, None), Err(Reason::Error));
+        assert_eq!(locate(&doc, 99, "x", 1, None), Err(Reason::NotFound));
+        assert_eq!(locate(&doc, 1, "{{nope}}", 1, None), Err(Reason::NotFound));
+        assert_eq!(goto(&mut a, 1, "{{nope}}", 1, None), Err(Reason::NotFound));
         let mut none = SlideApp::new(deckcraft_engine::Session::new(), Default::default());
-        assert_eq!(goto(&mut none, 1, "x", 1), Err(Reason::Error));
+        assert_eq!(goto(&mut none, 1, "x", 1, None), Err(Reason::Error));
+    }
+
+    #[test]
+    fn a_thousand_char_text_is_looked_for_not_refused() {
+        let a = app();
+        let doc = a.session.doc().unwrap().doc.clone();
+        let long = format!("{{{{{}", "가".repeat(998));
+        assert_eq!(long.encode_utf16().count(), 1000);
+        assert_eq!(locate(&doc, 1, &long, 1, None), Err(Reason::NotFound));
+        assert_eq!(locate(&doc, 1, &"x".repeat(MAX_TEXT_CHARS + 1), 1, None), Err(Reason::Error));
     }
 
     #[test]
@@ -179,15 +198,19 @@ mod tests {
         a.run("slide.new", json!({})).unwrap();
 
         let doc = a.session.doc().unwrap().doc.clone();
-        let f = |n| locate(&doc, 1, "{{a}}", n).unwrap();
+        let f = |n| locate(&doc, 1, "{{a}}", n, None).unwrap();
         assert_eq!((f(1).cell, f(1).start, f(1).end), (None, 0, 5));
         assert_eq!((f(2).cell, f(2).start), (None, 10));
         assert_eq!((f(3).cell, f(3).para), (Some((0, 0)), 0));
         assert_eq!(f(4).cell, Some((1, 1)));
-        assert_eq!(locate(&doc, 1, "{{a}}", 5), Err(Reason::NotFound));
+        assert_eq!(locate(&doc, 1, "{{a}}", 5, None), Err(Reason::NotFound));
+        // A total that differs from the slide's count finds nothing, however the n-th would fit.
+        assert_eq!(locate(&doc, 1, "{{a}}", 2, Some(4)).map(|f| f.start), Ok(10));
+        assert_eq!(locate(&doc, 1, "{{a}}", 2, Some(3)), Err(Reason::NotFound));
+        assert_eq!(locate(&doc, 1, "{{a}}", 2, Some(5)), Err(Reason::NotFound));
 
         // The jump leaves the app on that slide with the 4th match selected for editing.
-        goto(&mut a, 1, "{{a}}", 4).unwrap();
+        goto(&mut a, 1, "{{a}}", 4, Some(4)).unwrap();
         let st = a.session.doc().unwrap();
         assert_eq!(st.selection.slide, 0);
         let t = st.selection.text.clone().unwrap();
@@ -228,21 +251,23 @@ mod tests {
         for probe in probes {
             let l = &probe["location"];
             let (slide, text, n) = (l["slide"].as_u64().unwrap() as usize, l["text"].as_str().unwrap(), l["occurrence"].as_u64().unwrap() as usize);
-            let f = locate(&doc, slide, text, n).unwrap_or_else(|e| panic!("{l}: {e:?}"));
+            let total = l["total"].as_u64().map(|t| t as usize);
+            let f = locate(&doc, slide, text, n, total).unwrap_or_else(|e| panic!("{l}: {e:?}"));
             assert_eq!(para_text(&f, slide), probe["paragraph"].as_str().unwrap(), "{l}");
             // The match is where the host says: the slice at the range is the text itself.
             let chars: Vec<char> = para_text(&f, slide).chars().collect();
             assert_eq!(chars[f.start..f.end].iter().collect::<String>(), text);
         }
         // One past the last occurrence is not found, so a stale count can't land on a neighbour.
-        assert_eq!(locate(&doc, 2, "{{name}}", 5), Err(Reason::NotFound));
+        assert_eq!(locate(&doc, 2, "{{name}}", 5, None), Err(Reason::NotFound));
         // Error and warning locations of the fixture all resolve.
         for item in ["errors", "warnings"] {
             for e in expected["pptx"][item].as_array().unwrap() {
                 let l = &e["location"];
                 let (slide, text, n) =
                     (l["slide"].as_u64().unwrap() as usize, l["text"].as_str().unwrap(), l["occurrence"].as_u64().unwrap() as usize);
-                assert!(locate(&doc, slide, text, n).is_ok(), "{l}");
+                let total = l["total"].as_u64().map(|t| t as usize);
+                assert!(locate(&doc, slide, text, n, total).is_ok(), "{l}");
             }
         }
     }

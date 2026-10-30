@@ -21,13 +21,15 @@
 //!   presentation open).
 //!
 //! - `deckcraft:goto` (from the parent): `{ id, location }`, location `{ kind: "pptx", slide, text,
-//!   occurrence }`: slide and occurrence count from 1, slides in presentation order. It opens that
+//!   occurrence, total? }`: slide and occurrence count from 1, slides in presentation order.
+//!   With `total`, the slide must hold exactly that many matches or the answer is `not-found`.
+//!   Past 16 waiting jumps the oldest is answered `error` and dropped. It opens that
 //!   slide and selects the `occurrence`-th match of `text` on it (shapes in shape-tree order,
 //!   groups expanded, tables row by row; speaker notes left out), ready to edit.
 //! - `deckcraft:goto-done` (to the parent): `{ id }` when it did.
 //! - `deckcraft:goto-failed` (to the parent): `{ id, reason }`, reason `"not-found"` (no such
-//!   slide or match), `"unsupported"` (a location of another kind) or `"error"` (a malformed
-//!   request, no presentation open).
+//!   slide or match, no presentation open yet), `"unsupported"` (a location of another kind) or `"error"` (a malformed
+//!   request).
 //!
 //! - `deckcraft:request-bytes` (from the parent): `{ id, purpose }`, purpose `"save"`, `"check"` or
 //!   `"preview"`. It asks for the presentation as it is now, as a `.pptx`.
@@ -111,7 +113,7 @@ struct FontRequest {
 /// (`"unsupported"` or `"error"`).
 struct GotoRequest {
     id: String,
-    target: Result<(usize, String, usize), &'static str>,
+    target: Result<(usize, String, usize, Option<usize>), &'static str>,
 }
 
 /// A table the parent asked for: its request id and the rows, or why they couldn't be read.
@@ -232,10 +234,11 @@ impl Bridge {
     pub fn deliver_gotos(&self, app: &mut SlideApp) {
         for GotoRequest { id, target } in std::mem::take(&mut *self.gotos.borrow_mut()) {
             let result = match target {
-                Ok((slide, text, occurrence)) if app.opened_ok() && self.opened.borrow().is_empty() && !app.opening_file() => {
-                    host_goto::goto(app, slide, &text, occurrence).map_err(host_goto::Reason::as_str)
+                Ok((slide, text, occurrence, total)) if app.opened_ok() && self.opened.borrow().is_empty() && !app.opening_file() => {
+                    host_goto::goto(app, slide, &text, occurrence, total).map_err(host_goto::Reason::as_str)
                 }
-                Ok(_) => Err("error"),
+                // The presentation hasn't arrived (or is still opening): there is nothing to find yet.
+                Ok(_) => Err("not-found"),
                 Err(reason) => Err(reason),
             };
             match result {
@@ -404,8 +407,18 @@ impl Bridge {
                 }
                 Some("deckcraft:goto") => {
                     let Some(id) = string(&data, "id").filter(|id| !id.is_empty() && id.len() <= MAX_ID_BYTES) else { return };
-                    if gotos.borrow().len() < MAX_PENDING_REQUESTS {
-                        gotos.borrow_mut().push(GotoRequest { id, target: goto_target(&data) });
+                    // Past the cap the oldest waiting jump is dropped, and its parent told.
+                    let dropped = {
+                        let mut queue = gotos.borrow_mut();
+                        let dropped = (queue.len() >= MAX_PENDING_REQUESTS).then(|| queue.remove(0));
+                        queue.push(GotoRequest { id, target: goto_target(&data) });
+                        dropped
+                    };
+                    if let Some(old) = dropped
+                        && let Some(m) =
+                            message(&[("type", "deckcraft:goto-failed".into()), ("id", old.id.as_str().into()), ("reason", "error".into())])
+                    {
+                        let _ = parent.post_message(&m, &origin);
                     }
                 }
                 Some("deckcraft:request-bytes") => {
@@ -440,7 +453,7 @@ impl Bridge {
 
 /// `location` as `(slide, text, occurrence)`; `"unsupported"` for another kind of location,
 /// `"error"` for a pptx one that can't be used.
-fn goto_target(data: &JsValue) -> Result<(usize, String, usize), &'static str> {
+fn goto_target(data: &JsValue) -> Result<(usize, String, usize, Option<usize>), &'static str> {
     let location = js_sys::Reflect::get(data, &JsValue::from_str("location")).map_err(|_| "error")?;
     if !location.is_object() {
         return Err("error");
@@ -453,7 +466,12 @@ fn goto_target(data: &JsValue) -> Result<(usize, String, usize), &'static str> {
         (n.fract() == 0.0 && (1.0..=f64::from(u32::MAX)).contains(&n)).then_some(n as usize)
     };
     let text = string(&location, "text").filter(|t| !t.is_empty() && t.chars().count() <= MAX_TEXT_CHARS).ok_or("error")?;
-    Ok((count("slide").ok_or("error")?, text, count("occurrence").ok_or("error")?))
+    // `total` is optional; one that is sent but is no count makes the request unusable.
+    let total = match js_sys::Reflect::get(&location, &JsValue::from_str("total")) {
+        Ok(v) if v.is_undefined() || v.is_null() => None,
+        _ => Some(count("total").ok_or("error")?),
+    };
+    Ok((count("slide").ok_or("error")?, text, count("occurrence").ok_or("error")?, total))
 }
 
 fn is_presentation(name: &str) -> bool {
