@@ -20,6 +20,15 @@
 //! - `deckcraft:table-failed` (to the parent): `{ id, error }` when it couldn't (bad rows, no
 //!   presentation open).
 //!
+//! - `deckcraft:goto` (from the parent): `{ id, location }`, location `{ kind: "pptx", slide, text,
+//!   occurrence }`: slide and occurrence count from 1, slides in presentation order. It opens that
+//!   slide and selects the `occurrence`-th match of `text` on it (shapes in shape-tree order,
+//!   groups expanded, tables row by row; speaker notes left out), ready to edit.
+//! - `deckcraft:goto-done` (to the parent): `{ id }` when it did.
+//! - `deckcraft:goto-failed` (to the parent): `{ id, reason }`, reason `"not-found"` (no such
+//!   slide or match), `"unsupported"` (a location of another kind) or `"error"` (a malformed
+//!   request, no presentation open).
+//!
 //! - `deckcraft:request-bytes` (from the parent): `{ id, purpose }`, purpose `"save"`, `"check"` or
 //!   `"preview"`. It asks for the presentation as it is now, as a `.pptx`.
 //! - `deckcraft:bytes` (to the parent): `{ id, purpose, name, bytes }` (a transferred `ArrayBuffer`),
@@ -49,6 +58,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use deckcraft_ui_egui::host_goto::{self, MAX_TEXT_CHARS};
 use deckcraft_ui_egui::host_table::{self, MAX_CELL_CHARS, MAX_COLS, MAX_ROWS};
 use deckcraft_ui_egui::{Inbox, InboxEvent, InboxFile, Services, SlideApp};
 use wasm_bindgen::JsCast as _;
@@ -97,6 +107,13 @@ struct FontRequest {
     fonts: Vec<FontEntry>,
 }
 
+/// A jump the parent asked for: its request id and where, or why the location can't be used
+/// (`"unsupported"` or `"error"`).
+struct GotoRequest {
+    id: String,
+    target: Result<(usize, String, usize), &'static str>,
+}
+
 /// A table the parent asked for: its request id and the rows, or why they couldn't be read.
 struct TableRequest {
     id: String,
@@ -112,6 +129,8 @@ pub struct Bridge {
     opened: Rc<RefCell<Vec<(String, Vec<u8>, Vec<(String, bool)>)>>>,
     /// Tables from the parent not yet inserted.
     tables: Rc<RefCell<Vec<TableRequest>>>,
+    /// Jumps from the parent not yet made.
+    gotos: Rc<RefCell<Vec<GotoRequest>>>,
     /// Names of the files handed to the parent since the last frame.
     saved: Rc<RefCell<Vec<String>>>,
     /// The unsaved-changes state last reported to the parent.
@@ -145,6 +164,7 @@ impl Bridge {
             origin,
             opened: Rc::default(),
             tables: Rc::default(),
+            gotos: Rc::default(),
             saved: Rc::default(),
             reported: Rc::default(),
             failures: Rc::default(),
@@ -203,6 +223,24 @@ impl Bridge {
             match rows.and_then(|rows| host_table::insert_table(app, &rows)) {
                 Ok(()) => self.send(&[("type", "deckcraft:table-inserted".into()), ("id", id.as_str().into())]),
                 Err(error) => self.send(&[("type", "deckcraft:table-failed".into()), ("id", id.as_str().into()), ("error", error.as_str().into())]),
+            };
+        }
+    }
+
+    /// Before each pass: jumps from the parent select their text and the parent hears how each
+    /// went.
+    pub fn deliver_gotos(&self, app: &mut SlideApp) {
+        for GotoRequest { id, target } in std::mem::take(&mut *self.gotos.borrow_mut()) {
+            let result = match target {
+                Ok((slide, text, occurrence)) if app.opened_ok() && self.opened.borrow().is_empty() && !app.opening_file() => {
+                    host_goto::goto(app, slide, &text, occurrence).map_err(host_goto::Reason::as_str)
+                }
+                Ok(_) => Err("error"),
+                Err(reason) => Err(reason),
+            };
+            match result {
+                Ok(()) => self.send(&[("type", "deckcraft:goto-done".into()), ("id", id.as_str().into())]),
+                Err(reason) => self.send(&[("type", "deckcraft:goto-failed".into()), ("id", id.as_str().into()), ("reason", reason.into())]),
             };
         }
     }
@@ -342,6 +380,7 @@ impl Bridge {
         let origin = self.origin.clone();
         let opened = self.opened.clone();
         let tables = self.tables.clone();
+        let gotos = self.gotos.clone();
         let byte_requests = self.byte_requests.clone();
         let fonts = self.fonts.clone();
         let installed = self.installed.clone();
@@ -361,6 +400,12 @@ impl Bridge {
                     let Some(id) = string(&data, "id").filter(|id| !id.is_empty() && id.len() <= MAX_ID_BYTES) else { return };
                     if tables.borrow().len() < MAX_PENDING_TABLES {
                         tables.borrow_mut().push(TableRequest { id, rows: rows(&data) });
+                    }
+                }
+                Some("deckcraft:goto") => {
+                    let Some(id) = string(&data, "id").filter(|id| !id.is_empty() && id.len() <= MAX_ID_BYTES) else { return };
+                    if gotos.borrow().len() < MAX_PENDING_REQUESTS {
+                        gotos.borrow_mut().push(GotoRequest { id, target: goto_target(&data) });
                     }
                 }
                 Some("deckcraft:request-bytes") => {
@@ -391,6 +436,24 @@ impl Bridge {
     fn send(&self, fields: &[(&str, JsValue)]) -> bool {
         message(fields).is_some_and(|m| self.parent.post_message(&m, &self.origin).is_ok())
     }
+}
+
+/// `location` as `(slide, text, occurrence)`; `"unsupported"` for another kind of location,
+/// `"error"` for a pptx one that can't be used.
+fn goto_target(data: &JsValue) -> Result<(usize, String, usize), &'static str> {
+    let location = js_sys::Reflect::get(data, &JsValue::from_str("location")).map_err(|_| "error")?;
+    if !location.is_object() {
+        return Err("error");
+    }
+    if string(&location, "kind").as_deref() != Some("pptx") {
+        return Err("unsupported");
+    }
+    let count = |key: &str| {
+        let n = js_sys::Reflect::get(&location, &JsValue::from_str(key)).ok()?.as_f64()?;
+        (n.fract() == 0.0 && (1.0..=f64::from(u32::MAX)).contains(&n)).then_some(n as usize)
+    };
+    let text = string(&location, "text").filter(|t| !t.is_empty() && t.chars().count() <= MAX_TEXT_CHARS).ok_or("error")?;
+    Ok((count("slide").ok_or("error")?, text, count("occurrence").ok_or("error")?))
 }
 
 fn is_presentation(name: &str) -> bool {
