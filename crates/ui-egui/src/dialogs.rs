@@ -2792,9 +2792,7 @@ fn font_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     seed_font_fields(d);
     let mut fams = crate::ribbon::font_families(app);
     let family = d.get("family", "");
-    if !family.is_empty() && !fams.iter().any(|f| f == &family) {
-        fams.insert(0, family.clone());
-    }
+    crate::ribbon::insert_current(&mut fams, 0, &family, &crate::ribbon::font_label);
     ui.horizontal(|ui| {
         ui.add_sized(vec2(88.0, 20.0), egui::Label::new(tl!("Font")));
         egui::ComboBox::from_id_salt("font_dialog_family")

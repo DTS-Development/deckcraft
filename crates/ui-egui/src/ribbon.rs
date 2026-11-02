@@ -494,7 +494,7 @@ pub fn font_label(family: &str) -> String {
 
 /// Puts `current` at `at` unless the list already has it, by stored or by shown name: a document
 /// that stores 나눔고딕 doesn't add a second line next to NanumGothic in the Korean interface.
-fn insert_current(v: &mut Vec<String>, at: usize, current: &str, label: &dyn Fn(&str) -> String) {
+pub(crate) fn insert_current(v: &mut Vec<String>, at: usize, current: &str, label: &dyn Fn(&str) -> String) {
     if current.trim().is_empty() {
         return;
     }
@@ -3514,6 +3514,11 @@ mod tests {
         assert_eq!(v, ["Pretendard", "NanumGothic"]);
         super::insert_current(&mut v, 1, "Calibri", &ko);
         assert_eq!(v, ["Pretendard", "Calibri", "NanumGothic"]);
+        // The font dialog puts the current font first, by the same rule.
+        let mut dialog = vec!["NanumGothic".to_string()];
+        super::insert_current(&mut dialog, 0, "나눔고딕", &ko);
+        super::insert_current(&mut dialog, 0, "Calibri", &ko);
+        assert_eq!(dialog, ["Calibri", "NanumGothic"]);
     }
 
     use super::*;
