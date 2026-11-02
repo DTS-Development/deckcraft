@@ -46,34 +46,25 @@ fn ppm_target(family: &str) -> Option<&'static str> {
         "arial" | "arial narrow" | "helvetica" | "helvetica neue" => "Liberation Sans",
         "times" | "times new roman" => "Liberation Serif",
         "courier" | "courier new" | "consolas" | "lucida console" => "Liberation Mono",
+        "바탕" | "batang" | "궁서" | "gungsuh" | "함초롬바탕" | "hcr batang" | "나눔명조" | "nanummyeongjo" | "hy신명조" | "hysinmyeongjo-medium" | "hy견명조"
+        | "hymyeongjo-extra" | "한컴바탕" => "NanumMyeongjo",
+        "굴림체" | "gulimche" | "돋움체" | "dotumche" | "바탕체" | "batangche" | "궁서체" | "gungsuhche" | "nanumgothiccoding" => "NanumGothicCoding",
+        "hy헤드라인m" | "hyheadline-medium" | "hy견고딕" | "hygothic-extra" | "black han sans" => "Black Han Sans",
+        "pretendard" => "Pretendard",
         "맑은 고딕"
         | "malgun gothic"
         | "굴림"
         | "gulim"
-        | "굴림체"
-        | "gulimche"
         | "새굴림"
         | "new gulim"
         | "돋움"
         | "dotum"
-        | "돋움체"
-        | "dotumche"
-        | "바탕"
-        | "batang"
-        | "바탕체"
-        | "batangche"
-        | "궁서"
-        | "gungsuh"
-        | "궁서체"
-        | "gungsuhche"
-        | "함초롬바탕"
-        | "hcr batang"
         | "함초롬돋움"
         | "hcr dotum"
         | "나눔고딕"
         | "nanumgothic"
-        | "나눔명조"
-        | "nanummyeongjo"
+        | "hy중고딕"
+        | "hygothic-medium"
         | "noto sans kr"
         | "noto sans cjk kr"
         | "noto serif kr"
@@ -92,6 +83,11 @@ pub fn substitutes(family: &str) -> &'static [&'static str] {
             "Liberation Sans" => &["Liberation Sans", "Arial", "Helvetica Neue", "Helvetica", "Inter"],
             "Liberation Serif" => &["Liberation Serif", "Times New Roman", "Times", "Merriweather"],
             "Liberation Mono" => &["Liberation Mono", "Courier New", "Menlo", "Courier"],
+            // A Korean face that isn't bundled falls to NanumGothic, which draws Hangul.
+            "NanumMyeongjo" => &["NanumMyeongjo", "NanumGothic"],
+            "NanumGothicCoding" => &["NanumGothicCoding", "NanumGothic"],
+            "Black Han Sans" => &["Black Han Sans", "NanumGothic"],
+            "Pretendard" => &["Pretendard", "NanumGothic"],
             _ => &["NanumGothic"],
         };
     }
@@ -909,6 +905,21 @@ impl FontDb {
         let mut v: Vec<String> = self.read_faces().iter().map(|f| f.family.clone()).collect();
         #[cfg(not(target_arch = "wasm32"))]
         v.extend(self.read_catalog().iter().map(|c| c.family.clone()));
+        v.sort_by_key(|a| a.to_lowercase());
+        v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        v
+    }
+
+    /// The families the PPM font menu offers: those with a face that draws Hangul (U+AC00 in the
+    /// font file's cmap), and those with a face added at run time (an uploaded font, one embedded
+    /// in a document), which stay whatever they cover. Sorted and deduplicated like [`FontDb::families`].
+    pub fn hangul_families(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .read_faces()
+            .iter()
+            .filter(|f| matches!(f.bytes, FontBytes::Owned(_)) || f.glyph_for('\u{AC00}') != 0)
+            .map(|f| f.family.clone())
+            .collect();
         v.sort_by_key(|a| a.to_lowercase());
         v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         v

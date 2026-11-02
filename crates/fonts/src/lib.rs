@@ -449,36 +449,43 @@ mod tests {
                 "Malgun Gothic",
                 "굴림",
                 "Gulim",
-                "굴림체",
-                "GulimChe",
                 "새굴림",
                 "New Gulim",
                 "돋움",
                 "Dotum",
-                "돋움체",
-                "DotumChe",
-                "바탕",
-                "Batang",
-                "바탕체",
-                "BatangChe",
-                "궁서",
-                "Gungsuh",
-                "궁서체",
-                "GungsuhChe",
-                "함초롬바탕",
-                "HCR Batang",
                 "함초롬돋움",
                 "HCR Dotum",
                 "나눔고딕",
                 "NanumGothic",
-                "나눔명조",
-                "NanumMyeongjo",
+                "HY중고딕",
+                "HYGothic-Medium",
                 "Noto Sans KR",
                 "Noto Sans CJK KR",
                 "Noto Serif KR",
                 "Apple SD Gothic Neo",
             ],
         ),
+        (
+            "NanumMyeongjo",
+            &[
+                "바탕",
+                "Batang",
+                "궁서",
+                "Gungsuh",
+                "함초롬바탕",
+                "HCR Batang",
+                "나눔명조",
+                "NanumMyeongjo",
+                "HY신명조",
+                "HYSinMyeongJo-Medium",
+                "HY견명조",
+                "HYMyeongJo-Extra",
+                "한컴바탕",
+            ],
+        ),
+        ("NanumGothicCoding", &["굴림체", "GulimChe", "돋움체", "DotumChe", "바탕체", "BatangChe", "궁서체", "GungsuhChe", "NanumGothicCoding"]),
+        ("Black Han Sans", &["HY헤드라인M", "HYHeadLine-Medium", "HY견고딕", "HYGothic-Extra", "Black Han Sans"]),
+        ("Pretendard", &["Pretendard"]),
     ];
 
     #[cfg(feature = "ppm")]
@@ -491,6 +498,32 @@ mod tests {
             }
         }
         assert!(substitutes("zzz").is_empty());
+    }
+
+    /// A Korean face that isn't bundled falls to NanumGothic.
+    #[cfg(feature = "ppm")]
+    #[test]
+    fn korean_faces_fall_back_to_nanum_gothic() {
+        for target in ["NanumMyeongjo", "NanumGothicCoding", "Black Han Sans", "Pretendard"] {
+            assert_eq!(substitutes(target), [target, "NanumGothic"], "{target}");
+        }
+    }
+
+    /// The PPM menu keeps what draws Hangul, judged by the font file, and what was added at run time.
+    #[test]
+    fn the_menu_lists_hangul_families_and_added_fonts() {
+        let db = FontDb::with_font_dirs(Vec::new());
+        db.set_system_fallback(false);
+        let latin_only = db.hangul_families();
+        // Bundled Latin faces (and the last-resort Ubuntu) draw no Hangul; NanumGothic does when present.
+        assert!(!latin_only.iter().any(|f| matches!(f.as_str(), "Ubuntu" | "Inter" | "Carlito" | "Liberation Sans")), "{latin_only:?}");
+        assert_eq!(latin_only.iter().any(|f| f == "NanumGothic"), CRAFT_FONTS.iter().any(|f| f.family == "NanumGothic"));
+        // An added font stays whatever it covers (here an English-only face), under the name it was given.
+        let ubuntu = epaint_default_fonts::UBUNTU_LIGHT.to_vec();
+        assert!(db.add_uploaded_font(ubuntu, "Company Sans") > 0);
+        let with_upload = db.hangul_families();
+        assert!(with_upload.iter().any(|f| f == "Company Sans"), "{with_upload:?}");
+        assert!(with_upload.windows(2).all(|w| w[0].to_lowercase() <= w[1].to_lowercase()), "sorted: {with_upload:?}");
     }
 
     #[test]

@@ -483,6 +483,20 @@ fn slides_group(app: &mut SlideApp, ui: &mut Ui) {
 }
 
 pub fn font_families(app: &SlideApp) -> Vec<String> {
+    font_families_for(app, "")
+}
+
+/// [`font_families`] with `current` (the selection's font) kept in the PPM build's list, which
+/// otherwise offers only the families that draw Hangul and the ones added at run time (uploaded,
+/// embedded in the document). The theme fonts (Aptos…) are not offered there unless they qualify.
+pub fn font_families_for(app: &SlideApp, current: &str) -> Vec<String> {
+    if deckcraft_engine::hostlock::HOST_BUILD {
+        let mut v = deckcraft_fonts::FontDb::global().hangul_families();
+        if !current.trim().is_empty() && !v.iter().any(|f| f.eq_ignore_ascii_case(current)) {
+            v.insert(0, current.to_string());
+        }
+        return v;
+    }
     let mut v = vec![];
     if let Some(m) = app.session.active().and_then(|d| d.doc.masters.first()) {
         v.push(m.theme.fonts.major.latin.clone());
@@ -501,8 +515,10 @@ fn font_group(app: &mut SlideApp, ui: &mut Ui, st: &Value) {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let font = st.get("font").and_then(Value::as_str).unwrap_or("").to_string();
                 let size = st.get("size").and_then(Value::as_f64);
-                let fams = font_families(app);
-                let theme_fonts: Vec<String> = fams.iter().take(2).cloned().collect();
+                let fams = font_families_for(app, &font);
+                // The first two entries are the theme's heading and body fonts, except in the PPM
+                // build's Hangul-only list.
+                let theme_fonts: Vec<String> = if deckcraft_engine::hostlock::HOST_BUILD { vec![] } else { fams.iter().take(2).cloned().collect() };
                 dropdown(ui, "font", &font, 150.0, en, |ui| {
                     for (k, f) in fams.iter().enumerate() {
                         let label = if k == 0 && theme_fonts.len() == 2 {
@@ -516,7 +532,7 @@ fn font_group(app: &mut SlideApp, ui: &mut Ui, st: &Value) {
                             run(app, "format.font", json!({"family": f}));
                             ui.close();
                         }
-                        if k == 1 {
+                        if k == 1 && theme_fonts.len() == 2 {
                             ui.separator();
                         }
                     }
