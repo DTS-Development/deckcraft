@@ -169,11 +169,14 @@ pub fn install_fonts_with(ctx: &egui::Context, extra: &[std::sync::Arc<deckcraft
 pub fn font_definitions(extra: &[std::sync::Arc<deckcraft_fonts::FontFace>]) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
     let mut names = vec![];
+    // Only the first Korean Regular is an interface face (the rest of the Korean set draws documents
+    // through the font database); each interface face is parsed again on every `set_fonts`.
+    let first_kore = deckcraft_fonts::CRAFT_FONTS.iter().position(|f| f.scripts.contains(&"Kore") && f.style == "Regular");
     for (i, f) in deckcraft_fonts::CRAFT_FONTS.iter().enumerate() {
         let wanted = (f.family == "Inter" && (f.style == "Regular" || f.style == "SemiBold" || f.style == "Bold"))
             || (f.family == "BIZ UDPGothic" && f.style == "Regular")
             || (f.family == "Noto Sans Arabic")
-            || f.scripts.contains(&"Kore");
+            || first_kore == Some(i);
         if !wanted {
             continue;
         }

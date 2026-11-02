@@ -46,9 +46,22 @@ fn ppm_target(family: &str) -> Option<&'static str> {
         "arial" | "arial narrow" | "helvetica" | "helvetica neue" => "Liberation Sans",
         "times" | "times new roman" => "Liberation Serif",
         "courier" | "courier new" | "consolas" | "lucida console" => "Liberation Mono",
-        "바탕" | "batang" | "궁서" | "gungsuh" | "함초롬바탕" | "hcr batang" | "나눔명조" | "nanummyeongjo" | "hy신명조" | "hysinmyeongjo-medium" | "hy견명조"
-        | "hymyeongjo-extra" | "한컴바탕" => "NanumMyeongjo",
-        "굴림체" | "gulimche" | "돋움체" | "dotumche" | "바탕체" | "batangche" | "궁서체" | "gungsuhche" | "nanumgothiccoding" | "나눔고딕코딩" => "NanumGothicCoding",
+        "바탕"
+        | "batang"
+        | "궁서"
+        | "gungsuh"
+        | "함초롬바탕"
+        | "hcr batang"
+        | "나눔명조"
+        | "nanummyeongjo"
+        | "hy신명조"
+        | "hysinmyeongjo-medium"
+        | "hy견명조"
+        | "hymyeongjo-extra"
+        | "한컴바탕" => "NanumMyeongjo",
+        "굴림체" | "gulimche" | "돋움체" | "dotumche" | "바탕체" | "batangche" | "궁서체" | "gungsuhche" | "nanumgothiccoding" | "나눔고딕코딩" => {
+            "NanumGothicCoding"
+        }
         "hy헤드라인m" | "hyheadline-medium" | "hy견고딕" | "hygothic-extra" | "black han sans" | "검은고딕" => "Black Han Sans",
         "pretendard" => "Pretendard",
         "맑은 고딕"
@@ -361,6 +374,15 @@ struct CatalogEntry {
     path: std::path::PathBuf,
 }
 
+/// What the PPM font menu needs from the faces, found once per set of faces: the families with a
+/// bundled face that draws Hangul, those only added at run time, and the Korean family names.
+struct HangulSet {
+    bundled: Vec<String>,
+    runtime: Vec<String>,
+    /// Lowercase family -> its Korean name (the first face that has one).
+    korean: HashMap<String, String>,
+}
+
 /// Process-wide font database.
 pub struct FontDb {
     faces: RwLock<Vec<Arc<FontFace>>>,
@@ -370,6 +392,9 @@ pub struct FontDb {
     replaced: RwLock<Vec<Arc<FontFace>>>,
     uploaded: RwLock<std::collections::HashSet<u32>>,
     outlines: Mutex<HashMap<(u32, u32), Arc<BezPath>>>,
+    /// [`HangulSet`] of the faces it was built for (their count and summed ids): rebuilt only when
+    /// a font is added, not on every repaint of the font menu.
+    hangul: Mutex<Option<((usize, u64), Arc<HangulSet>)>>,
     #[cfg(not(target_arch = "wasm32"))]
     catalog: RwLock<Vec<CatalogEntry>>,
     /// The folders the system font scan reads (the platform's font folders for [`FontDb::global`]).
@@ -872,6 +897,7 @@ impl FontDb {
             replaced: RwLock::new(Vec::new()),
             uploaded: RwLock::new(std::collections::HashSet::new()),
             outlines: Mutex::new(HashMap::new()),
+            hangul: Mutex::new(None),
             #[cfg(not(target_arch = "wasm32"))]
             catalog: RwLock::new(Vec::new()),
             font_dirs,
@@ -926,30 +952,57 @@ impl FontDb {
         v
     }
 
+    fn hangul_set(&self) -> Arc<HangulSet> {
+        let faces = self.read_faces();
+        let key = (faces.len(), faces.iter().fold(0u64, |a, f| a.wrapping_add(f.id() as u64)));
+        let mut cache = self.hangul.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(set) = cache.as_ref().filter(|(k, _)| *k == key).map(|(_, set)| set.clone()) {
+            return set;
+        }
+        let owned = |f: &FontFace| matches!(f.bytes, FontBytes::Owned(_));
+        let mut set = HangulSet { bundled: Vec::new(), runtime: Vec::new(), korean: HashMap::new() };
+        for f in faces.iter() {
+            let list = if owned(f) {
+                &mut set.runtime
+            } else if f.glyph_for('\u{AC00}') != 0 {
+                &mut set.bundled
+            } else {
+                continue;
+            };
+            if !list.iter().any(|o| o.eq_ignore_ascii_case(&f.family)) {
+                list.push(f.family.clone());
+            }
+        }
+        for f in faces.iter() {
+            if let Some(ko) = &f.ko_family {
+                set.korean.entry(f.family.to_lowercase()).or_insert_with(|| ko.clone());
+            }
+        }
+        set.runtime.retain(|r| !set.bundled.iter().any(|b| b.eq_ignore_ascii_case(r)));
+        let set = Arc::new(set);
+        *cache = Some((key, set.clone()));
+        set
+    }
+
     /// The families the PPM font menu offers: first those with a bundled face that draws Hangul
     /// (U+AC00 in the font file's cmap), then those only added at run time (an uploaded font, one
     /// embedded in a document), which stay whatever they cover. Each part is sorted A-Z by the name
-    /// `label` shows, and deduplicated like [`FontDb::families`].
+    /// `label` shows. The faces are examined once per set of faces (see [`HangulSet`]).
     pub fn hangul_families(&self, label: &dyn Fn(&str) -> String) -> Vec<String> {
-        let faces = self.read_faces();
-        let part = |keep: &dyn Fn(&FontFace) -> bool| {
-            let mut v: Vec<String> = faces.iter().filter(|f| keep(f)).map(|f| f.family.clone()).collect();
-            v.sort_by_key(|a| label(a).to_lowercase());
-            v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        let set = self.hangul_set();
+        let sorted = |names: &[String]| {
+            let mut v = names.to_vec();
+            v.sort_by_cached_key(|n| label(n).to_lowercase());
             v
         };
-        let mut out = part(&|f| !matches!(f.bytes, FontBytes::Owned(_)) && f.glyph_for('\u{AC00}') != 0);
-        for f in part(&|f| matches!(f.bytes, FontBytes::Owned(_))) {
-            if !out.iter().any(|o| o.eq_ignore_ascii_case(&f)) {
-                out.push(f);
-            }
-        }
+        let mut out = sorted(&set.bundled);
+        out.extend(sorted(&set.runtime));
         out
     }
 
     /// The Korean name of `family` from a face's `name` table (나눔고딕), if it has one.
     pub fn korean_name(&self, family: &str) -> Option<String> {
-        self.read_faces().iter().filter(|f| f.family.eq_ignore_ascii_case(family)).find_map(|f| f.ko_family.clone())
+        self.hangul_set().korean.get(&family.to_lowercase()).cloned()
     }
 
     /// Style names available for `family` (Regular first, then by weight).

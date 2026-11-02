@@ -483,7 +483,10 @@ mod tests {
                 "한컴바탕",
             ],
         ),
-        ("NanumGothicCoding", &["굴림체", "GulimChe", "돋움체", "DotumChe", "바탕체", "BatangChe", "궁서체", "GungsuhChe", "NanumGothicCoding", "나눔고딕코딩"]),
+        (
+            "NanumGothicCoding",
+            &["굴림체", "GulimChe", "돋움체", "DotumChe", "바탕체", "BatangChe", "궁서체", "GungsuhChe", "NanumGothicCoding", "나눔고딕코딩"],
+        ),
         ("Black Han Sans", &["HY헤드라인M", "HYHeadLine-Medium", "HY견고딕", "HYGothic-Extra", "Black Han Sans", "검은고딕"]),
         ("Pretendard", &["Pretendard"]),
     ];
