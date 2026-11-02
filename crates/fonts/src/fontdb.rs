@@ -48,8 +48,8 @@ fn ppm_target(family: &str) -> Option<&'static str> {
         "courier" | "courier new" | "consolas" | "lucida console" => "Liberation Mono",
         "바탕" | "batang" | "궁서" | "gungsuh" | "함초롬바탕" | "hcr batang" | "나눔명조" | "nanummyeongjo" | "hy신명조" | "hysinmyeongjo-medium" | "hy견명조"
         | "hymyeongjo-extra" | "한컴바탕" => "NanumMyeongjo",
-        "굴림체" | "gulimche" | "돋움체" | "dotumche" | "바탕체" | "batangche" | "궁서체" | "gungsuhche" | "nanumgothiccoding" => "NanumGothicCoding",
-        "hy헤드라인m" | "hyheadline-medium" | "hy견고딕" | "hygothic-extra" | "black han sans" => "Black Han Sans",
+        "굴림체" | "gulimche" | "돋움체" | "dotumche" | "바탕체" | "batangche" | "궁서체" | "gungsuhche" | "nanumgothiccoding" | "나눔고딕코딩" => "NanumGothicCoding",
+        "hy헤드라인m" | "hyheadline-medium" | "hy견고딕" | "hygothic-extra" | "black han sans" | "검은고딕" => "Black Han Sans",
         "pretendard" => "Pretendard",
         "맑은 고딕"
         | "malgun gothic"
@@ -177,6 +177,9 @@ pub struct FontFace {
     /// the typographic one: "Segoe UI Semibold" / "Regular" for Segoe UI Semibold. Documents name
     /// fonts this way.
     pub legacy: Option<(String, String)>,
+    /// The family's Korean name from the font's `name` table (나눔고딕), when it has one that
+    /// differs from `family`. Only for display; documents store `family`.
+    pub ko_family: Option<String>,
     /// usWeightClass-style weight (400 = regular).
     pub weight: f32,
     pub italic: bool,
@@ -451,6 +454,17 @@ fn face_names(f: &skrifa::FontRef<'_>) -> Option<(String, String)> {
 
 /// A face's Windows (GDI) family and style (`name` IDs 1 and 2) when that family differs from the
 /// typographic `family`.
+/// The Korean (`ko`) family name in the `name` table: typographic (ID 16), else legacy (ID 1);
+/// `None` without one, or when it is the English name itself. Bounded in length.
+fn korean_family(f: &skrifa::FontRef<'_>, family: &str) -> Option<String> {
+    [StringId::TYPOGRAPHIC_FAMILY_NAME, StringId::FAMILY_NAME].into_iter().find_map(|id| {
+        f.localized_strings(id)
+            .find(|s| s.language().is_some_and(|l| l.eq_ignore_ascii_case("ko") || l.to_ascii_lowercase().starts_with("ko-")))
+            .map(|s| s.chars().take(128).collect::<String>().trim().to_string())
+            .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(family))
+    })
+}
+
 fn legacy_names(f: &skrifa::FontRef<'_>, family: &str) -> Option<(String, String)> {
     let legacy = name(f, &[StringId::FAMILY_NAME])?;
     if legacy.eq_ignore_ascii_case(family) {
@@ -753,11 +767,13 @@ fn make_face(bytes: FontBytes, index: u32, family: String, style: String, coords
         .or(axis(b"slnt").map(|v| v.abs() > 0.1))
         .unwrap_or(!matches!(a.style, skrifa::attribute::Style::Normal) || style_italic(&style));
     let legacy = if coords.is_empty() { legacy_names(&f, &family) } else { None };
+    let family_for_ko = family.clone();
     Some(FontFace {
         id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         family,
         style,
         legacy,
+        ko_family: if coords.is_empty() { korean_family(&f, &family_for_ko) } else { None },
         weight,
         italic,
         upem: m.units_per_em.max(1) as f64,
@@ -923,6 +939,11 @@ impl FontDb {
         v.sort_by_key(|a| a.to_lowercase());
         v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         v
+    }
+
+    /// The Korean name of `family` from a face's `name` table (나눔고딕), if it has one.
+    pub fn korean_name(&self, family: &str) -> Option<String> {
+        self.read_faces().iter().filter(|f| f.family.eq_ignore_ascii_case(family)).find_map(|f| f.ko_family.clone())
     }
 
     /// Style names available for `family` (Regular first, then by weight).

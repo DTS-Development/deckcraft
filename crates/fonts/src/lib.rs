@@ -483,8 +483,8 @@ mod tests {
                 "한컴바탕",
             ],
         ),
-        ("NanumGothicCoding", &["굴림체", "GulimChe", "돋움체", "DotumChe", "바탕체", "BatangChe", "궁서체", "GungsuhChe", "NanumGothicCoding"]),
-        ("Black Han Sans", &["HY헤드라인M", "HYHeadLine-Medium", "HY견고딕", "HYGothic-Extra", "Black Han Sans"]),
+        ("NanumGothicCoding", &["굴림체", "GulimChe", "돋움체", "DotumChe", "바탕체", "BatangChe", "궁서체", "GungsuhChe", "NanumGothicCoding", "나눔고딕코딩"]),
+        ("Black Han Sans", &["HY헤드라인M", "HYHeadLine-Medium", "HY견고딕", "HYGothic-Extra", "Black Han Sans", "검은고딕"]),
         ("Pretendard", &["Pretendard"]),
     ];
 
@@ -506,6 +506,26 @@ mod tests {
     fn korean_faces_fall_back_to_nanum_gothic() {
         for target in ["NanumMyeongjo", "NanumGothicCoding", "Black Han Sans", "Pretendard"] {
             assert_eq!(substitutes(target), [target, "NanumGothic"], "{target}");
+        }
+    }
+
+    /// The Korean family names come from the files' `name` tables; English stays the stored name.
+    #[test]
+    fn korean_names_come_from_the_name_table() {
+        let db = FontDb::with_font_dirs(Vec::new());
+        db.set_system_fallback(false);
+        if CRAFT_FONTS.iter().any(|f| f.family == "NanumGothic") {
+            assert_eq!(db.korean_name("NanumGothic").as_deref(), Some("나눔고딕"));
+            assert_eq!(db.korean_name("nanumgothic").as_deref(), Some("나눔고딕"));
+        }
+        for (en, ko) in [("NanumMyeongjo", "나눔명조"), ("NanumGothicCoding", "나눔고딕코딩"), ("Black Han Sans", "검은고딕")] {
+            if CRAFT_FONTS.iter().any(|f| f.family == en) {
+                assert_eq!(db.korean_name(en).as_deref(), Some(ko), "{en}");
+            }
+        }
+        // No Korean name: Pretendard, Latin fonts, the last-resort face.
+        for en in ["Pretendard", "Carlito", "Ubuntu", "No Such Family"] {
+            assert_eq!(db.korean_name(en), None, "{en}");
         }
     }
 

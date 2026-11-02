@@ -482,6 +482,16 @@ fn slides_group(app: &mut SlideApp, ui: &mut Ui) {
     });
 }
 
+/// How a font is named on screen: in the PPM build with the Korean interface, its Korean name
+/// (나눔고딕) when its file has one; otherwise as stored. Documents always store the family name.
+pub fn font_label(family: &str) -> String {
+    if deckcraft_engine::hostlock::HOST_BUILD && i18n::current() == i18n::Lang::KO {
+        deckcraft_fonts::FontDb::global().korean_name(family).unwrap_or_else(|| family.to_string())
+    } else {
+        family.to_string()
+    }
+}
+
 pub fn font_families(app: &SlideApp) -> Vec<String> {
     // The dialogs have no theme entries of their own, so the PPM build's list there is the Hangul one alone.
     if deckcraft_engine::hostlock::HOST_BUILD {
@@ -523,14 +533,14 @@ fn font_group(app: &mut SlideApp, ui: &mut Ui, st: &Value) {
                 let size = st.get("size").and_then(Value::as_f64);
                 let fams = font_families_for(app, &font);
                 let theme_fonts: Vec<String> = fams.iter().take(2).cloned().collect();
-                dropdown(ui, "font", &font, 150.0, en, |ui| {
+                dropdown(ui, "font", &font_label(&font), 150.0, en, |ui| {
                     for (k, f) in fams.iter().enumerate() {
                         let label = if k == 0 && theme_fonts.len() == 2 {
-                            i18n::fmt(tl!("{font} (Headings)"), &[("font", f)])
+                            i18n::fmt(tl!("{font} (Headings)"), &[("font", &font_label(f))])
                         } else if k == 1 && theme_fonts.len() == 2 {
-                            i18n::fmt(tl!("{font} (Body)"), &[("font", f)])
+                            i18n::fmt(tl!("{font} (Body)"), &[("font", &font_label(f))])
                         } else {
-                            f.clone()
+                            font_label(f)
                         };
                         if ui.button(egui::RichText::new(label)).clicked() {
                             run(app, "format.font", json!({"family": f}));
