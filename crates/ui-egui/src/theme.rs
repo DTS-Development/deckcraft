@@ -165,13 +165,23 @@ pub fn install_fonts_with(ctx: &egui::Context, extra: &[std::sync::Arc<deckcraft
     ctx.set_fonts(font_definitions(extra));
 }
 
+/// The index of the Korean Regular used by the interface: NanumGothic's, wherever the manifest lists
+/// it, else the first Korean Regular (so a reordered manifest never picks a display face).
+fn interface_kore(fonts: &[deckcraft_fonts::CraftFont]) -> Option<usize> {
+    let kore_regular = |f: &deckcraft_fonts::CraftFont| f.scripts.contains(&"Kore") && f.style == "Regular";
+    fonts
+        .iter()
+        .position(|f| f.family == "NanumGothic" && kore_regular(f))
+        .or_else(|| fonts.iter().position(kore_regular))
+}
+
 /// The interface font definitions; see [`install_fonts_with`].
 pub fn font_definitions(extra: &[std::sync::Arc<deckcraft_fonts::FontFace>]) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
     let mut names = vec![];
-    // Only the first Korean Regular is an interface face (the rest of the Korean set draws documents
+    // Only one Korean Regular is an interface face (the rest of the Korean set draws documents
     // through the font database); each interface face is parsed again on every `set_fonts`.
-    let first_kore = deckcraft_fonts::CRAFT_FONTS.iter().position(|f| f.scripts.contains(&"Kore") && f.style == "Regular");
+    let first_kore = interface_kore(deckcraft_fonts::CRAFT_FONTS);
     for (i, f) in deckcraft_fonts::CRAFT_FONTS.iter().enumerate() {
         let wanted = (f.family == "Inter" && (f.style == "Regular" || f.style == "SemiBold" || f.style == "Bold"))
             || (f.family == "BIZ UDPGothic" && f.style == "Regular")
@@ -259,6 +269,21 @@ mod tests {
         let mut o = ctx.run_ui(Default::default(), |_| {});
         o.textures_delta.clear();
         out
+    }
+
+    #[test]
+    fn interface_kore_prefers_nanum_gothic_in_any_order() {
+        use deckcraft_fonts::CraftFont;
+        let f = |family, style| CraftFont { family, style, scripts: &["Kore"], bytes: &[] };
+        let black = f("Black Han Sans", "Regular");
+        let nanum = f("NanumGothic", "Regular");
+        let bold = f("NanumGothic", "Bold");
+        assert_eq!(super::interface_kore(&[black, nanum, bold]), Some(1));
+        let (black, nanum, bold) = (f("Black Han Sans", "Regular"), f("NanumGothic", "Regular"), f("NanumGothic", "Bold"));
+        assert_eq!(super::interface_kore(&[nanum, bold, black]), Some(0));
+        // Without NanumGothic, the first Korean Regular.
+        assert_eq!(super::interface_kore(&[f("Black Han Sans", "Regular"), f("Other", "Regular")]), Some(0));
+        assert_eq!(super::interface_kore(&[]), None);
     }
 
     #[test]
