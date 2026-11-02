@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PPM 포크 웹 빌드: 한글 글꼴(NanumGothic)과 Office 호환 글꼴(Carlito, Caladea, Liberation, Inter)을 넣어 dist/web 을 만든다.
+# PPM 포크 웹 빌드: 한글 글꼴 세트(NanumGothic, 나눔명조, 나눔고딕코딩, Black Han Sans, Pretendard)와 Office 호환 글꼴(Carlito, Caladea, Liberation, Inter)을 넣어 dist/web 을 만든다.
 # 이 글꼴만 들어간다(업스트림 릴리스에 있던 다른 글꼴은 빠진다).
 # 필요: Rust 1.95+ (기본 1.99.1), wasm32-unknown-unknown target, trunk 0.21+
 set -euo pipefail
@@ -23,5 +23,9 @@ cp "$fonts/carlito/OFL.txt" "$root/dist/web/licenses/Carlito-OFL.txt"
 cp "$fonts/caladea/LICENSE.txt" "$root/dist/web/licenses/Caladea-Apache-2.0.txt"
 cp "$fonts/liberation/OFL.txt" "$root/dist/web/licenses/Liberation-OFL.txt"
 cp "$fonts/inter/OFL.txt" "$root/dist/web/licenses/Inter-OFL.txt"
+cp "$fonts/nanum-myeongjo/OFL.txt" "$root/dist/web/licenses/NanumMyeongjo-OFL.txt"
+cp "$fonts/nanum-gothic-coding/OFL.txt" "$root/dist/web/licenses/NanumGothicCoding-OFL.txt"
+cp "$fonts/black-han-sans/OFL.txt" "$root/dist/web/licenses/BlackHanSans-OFL.txt"
+cp "$fonts/pretendard/LICENSE" "$root/dist/web/licenses/Pretendard-OFL.txt"
 # 관리자 화면이 읽는 명령 목록(표와 같은지는 ui-egui 테스트가 확인한다).
 cp "$root/ppm/commands.json" "$root/dist/web/commands.json"

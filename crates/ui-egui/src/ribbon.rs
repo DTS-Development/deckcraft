@@ -482,11 +482,57 @@ fn slides_group(app: &mut SlideApp, ui: &mut Ui) {
     });
 }
 
+/// How a font is named on screen: in the PPM build with the Korean interface, its Korean name
+/// (나눔고딕) when its file has one; otherwise as stored. Documents always store the family name.
+pub fn font_label(family: &str) -> String {
+    if deckcraft_engine::hostlock::HOST_BUILD && i18n::current() == i18n::Lang::KO {
+        deckcraft_fonts::FontDb::global().korean_name(family).unwrap_or_else(|| family.to_string())
+    } else {
+        family.to_string()
+    }
+}
+
+/// Puts `current` at `at` unless the list already has it, by stored or by shown name: a document
+/// that stores 나눔고딕 doesn't add a second line next to NanumGothic in the Korean interface.
+pub(crate) fn insert_current(v: &mut Vec<String>, at: usize, current: &str, label: &dyn Fn(&str) -> String) {
+    if current.trim().is_empty() {
+        return;
+    }
+    let shown = label(current);
+    if !v.iter().any(|f| f.eq_ignore_ascii_case(current) || label(f).eq_ignore_ascii_case(&shown)) {
+        v.insert(at, current.to_string());
+    }
+}
+
+/// Does the typed text (lowercase) match a family by its stored or its shown name? So "나눔" finds
+/// NanumGothic in the Korean interface, and "nanum" still does.
+pub fn font_matches(family: &str, needle: &str, label: &dyn Fn(&str) -> String) -> bool {
+    needle.is_empty() || family.to_lowercase().contains(needle) || label(family).to_lowercase().contains(needle)
+}
+
 pub fn font_families(app: &SlideApp) -> Vec<String> {
+    // The dialogs have no theme entries of their own, so the PPM build's list there is the Hangul one alone.
+    if deckcraft_engine::hostlock::HOST_BUILD {
+        return deckcraft_fonts::FontDb::global().hangul_families(&font_label);
+    }
+    font_families_for(app, "")
+}
+
+/// [`font_families`] with `current` (the selection's font) kept in the PPM build's list. There the
+/// "all fonts" part offers only the families that draw Hangul and the ones added at run time
+/// (uploaded, embedded in the document); the two theme font entries (Headings, Body) stay first,
+/// whatever their names.
+pub fn font_families_for(app: &SlideApp, current: &str) -> Vec<String> {
     let mut v = vec![];
     if let Some(m) = app.session.active().and_then(|d| d.doc.masters.first()) {
         v.push(m.theme.fonts.major.latin.clone());
         v.push(m.theme.fonts.minor.latin.clone());
+    }
+    if deckcraft_engine::hostlock::HOST_BUILD {
+        let theme = v.len();
+        v.extend(deckcraft_fonts::FontDb::global().hangul_families(&font_label));
+        insert_current(&mut v, theme, current, &font_label);
+        return v;
     }
     v.extend(deckcraft_fonts::FontDb::global().families());
     v.dedup();
@@ -501,22 +547,22 @@ fn font_group(app: &mut SlideApp, ui: &mut Ui, st: &Value) {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let font = st.get("font").and_then(Value::as_str).unwrap_or("").to_string();
                 let size = st.get("size").and_then(Value::as_f64);
-                let fams = font_families(app);
+                let fams = font_families_for(app, &font);
                 let theme_fonts: Vec<String> = fams.iter().take(2).cloned().collect();
-                dropdown(ui, "font", &font, 150.0, en, |ui| {
+                dropdown(ui, "font", &font_label(&font), 150.0, en, |ui| {
                     for (k, f) in fams.iter().enumerate() {
                         let label = if k == 0 && theme_fonts.len() == 2 {
-                            i18n::fmt(tl!("{font} (Headings)"), &[("font", f)])
+                            i18n::fmt(tl!("{font} (Headings)"), &[("font", &font_label(f))])
                         } else if k == 1 && theme_fonts.len() == 2 {
-                            i18n::fmt(tl!("{font} (Body)"), &[("font", f)])
+                            i18n::fmt(tl!("{font} (Body)"), &[("font", &font_label(f))])
                         } else {
-                            f.clone()
+                            font_label(f)
                         };
                         if ui.button(egui::RichText::new(label)).clicked() {
                             run(app, "format.font", json!({"family": f}));
                             ui.close();
                         }
-                        if k == 1 {
+                        if k == 1 && theme_fonts.len() == 2 {
                             ui.separator();
                         }
                     }
@@ -3455,6 +3501,26 @@ fn chart_menu_types() -> Vec<Option<deckcraft_model::chart::ChartType>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_font_menu_matches_and_keeps_current_by_shown_name() {
+        let ko = |n: &str| if n == "NanumGothic" { "나눔고딕".to_string() } else { n.to_string() };
+        assert!(super::font_matches("NanumGothic", "나눔", &ko));
+        assert!(super::font_matches("NanumGothic", "nanum", &ko));
+        assert!(super::font_matches("NanumGothic", "", &ko));
+        assert!(!super::font_matches("Pretendard", "나눔", &ko));
+        let mut v = vec!["Pretendard".to_string(), "NanumGothic".to_string()];
+        super::insert_current(&mut v, 0, "나눔고딕", &ko);
+        super::insert_current(&mut v, 0, " ", &ko);
+        assert_eq!(v, ["Pretendard", "NanumGothic"]);
+        super::insert_current(&mut v, 1, "Calibri", &ko);
+        assert_eq!(v, ["Pretendard", "Calibri", "NanumGothic"]);
+        // The font dialog puts the current font first, by the same rule.
+        let mut dialog = vec!["NanumGothic".to_string()];
+        super::insert_current(&mut dialog, 0, "나눔고딕", &ko);
+        super::insert_current(&mut dialog, 0, "Calibri", &ko);
+        assert_eq!(dialog, ["Calibri", "NanumGothic"]);
+    }
+
     use super::*;
     use deckcraft_model::anim::TextBuild;
 

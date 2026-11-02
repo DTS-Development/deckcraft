@@ -148,6 +148,7 @@ impl eframe::App for WebShell {
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        crate::clipboard_keys::drop_clipboard_key_presses(&mut raw.events);
         self.app.raw_input_hook(raw);
     }
 

@@ -1671,10 +1671,12 @@ fn body(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                     ui.add(egui::TextEdit::singleline(&mut to).desired_width(240.0).hint_text(tl!("Font name")));
                     let needle = to.trim().to_lowercase();
                     egui::ScrollArea::vertical().max_height(140.0).id_salt("rf_list").show(ui, |ui| {
-                        for f in
-                            crate::ribbon::font_families(app).iter().filter(|f| needle.is_empty() || f.to_lowercase().contains(&needle)).take(200)
+                        for f in crate::ribbon::font_families(app)
+                            .iter()
+                            .filter(|f| crate::ribbon::font_matches(f, &needle, &crate::ribbon::font_label))
+                            .take(200)
                         {
-                            if ui.selectable_label(f.eq_ignore_ascii_case(to.trim()), f).clicked() {
+                            if ui.selectable_label(f.eq_ignore_ascii_case(to.trim()), crate::ribbon::font_label(f)).clicked() {
                                 to = f.clone();
                             }
                         }
@@ -2790,23 +2792,21 @@ fn font_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     seed_font_fields(d);
     let mut fams = crate::ribbon::font_families(app);
     let family = d.get("family", "");
-    if !family.is_empty() && !fams.iter().any(|f| f == &family) {
-        fams.insert(0, family.clone());
-    }
+    crate::ribbon::insert_current(&mut fams, 0, &family, &crate::ribbon::font_label);
     ui.horizontal(|ui| {
         ui.add_sized(vec2(88.0, 20.0), egui::Label::new(tl!("Font")));
-        egui::ComboBox::from_id_salt("font_dialog_family").selected_text(if family.is_empty() { " " } else { family.as_str() }).width(300.0).show_ui(
-            ui,
-            |ui| {
+        egui::ComboBox::from_id_salt("font_dialog_family")
+            .selected_text(if family.is_empty() { " ".to_string() } else { crate::ribbon::font_label(&family) })
+            .width(300.0)
+            .show_ui(ui, |ui| {
                 egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
                     for f in &fams {
-                        if ui.selectable_label(family == *f, f).clicked() {
+                        if ui.selectable_label(family == *f, crate::ribbon::font_label(f)).clicked() {
                             d.fields.insert("family".into(), f.clone());
                         }
                     }
                 });
-            },
-        );
+            });
     });
     ui.horizontal(|ui| {
         let _ = labeled_text(ui, d, "Size", "size", 64.0);

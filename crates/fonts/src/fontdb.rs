@@ -46,34 +46,38 @@ fn ppm_target(family: &str) -> Option<&'static str> {
         "arial" | "arial narrow" | "helvetica" | "helvetica neue" => "Liberation Sans",
         "times" | "times new roman" => "Liberation Serif",
         "courier" | "courier new" | "consolas" | "lucida console" => "Liberation Mono",
+        "바탕"
+        | "batang"
+        | "궁서"
+        | "gungsuh"
+        | "함초롬바탕"
+        | "hcr batang"
+        | "나눔명조"
+        | "nanummyeongjo"
+        | "hy신명조"
+        | "hysinmyeongjo-medium"
+        | "hy견명조"
+        | "hymyeongjo-extra"
+        | "한컴바탕" => "NanumMyeongjo",
+        "굴림체" | "gulimche" | "돋움체" | "dotumche" | "바탕체" | "batangche" | "궁서체" | "gungsuhche" | "nanumgothiccoding" | "나눔고딕코딩" => {
+            "NanumGothicCoding"
+        }
+        "hy헤드라인m" | "hyheadline-medium" | "hy견고딕" | "hygothic-extra" | "black han sans" | "검은고딕" => "Black Han Sans",
+        "pretendard" => "Pretendard",
         "맑은 고딕"
         | "malgun gothic"
         | "굴림"
         | "gulim"
-        | "굴림체"
-        | "gulimche"
         | "새굴림"
         | "new gulim"
         | "돋움"
         | "dotum"
-        | "돋움체"
-        | "dotumche"
-        | "바탕"
-        | "batang"
-        | "바탕체"
-        | "batangche"
-        | "궁서"
-        | "gungsuh"
-        | "궁서체"
-        | "gungsuhche"
-        | "함초롬바탕"
-        | "hcr batang"
         | "함초롬돋움"
         | "hcr dotum"
         | "나눔고딕"
         | "nanumgothic"
-        | "나눔명조"
-        | "nanummyeongjo"
+        | "hy중고딕"
+        | "hygothic-medium"
         | "noto sans kr"
         | "noto sans cjk kr"
         | "noto serif kr"
@@ -92,6 +96,11 @@ pub fn substitutes(family: &str) -> &'static [&'static str] {
             "Liberation Sans" => &["Liberation Sans", "Arial", "Helvetica Neue", "Helvetica", "Inter"],
             "Liberation Serif" => &["Liberation Serif", "Times New Roman", "Times", "Merriweather"],
             "Liberation Mono" => &["Liberation Mono", "Courier New", "Menlo", "Courier"],
+            // A Korean face that isn't bundled falls to NanumGothic, which draws Hangul.
+            "NanumMyeongjo" => &["NanumMyeongjo", "NanumGothic"],
+            "NanumGothicCoding" => &["NanumGothicCoding", "NanumGothic"],
+            "Black Han Sans" => &["Black Han Sans", "NanumGothic"],
+            "Pretendard" => &["Pretendard", "NanumGothic"],
             _ => &["NanumGothic"],
         };
     }
@@ -181,6 +190,9 @@ pub struct FontFace {
     /// the typographic one: "Segoe UI Semibold" / "Regular" for Segoe UI Semibold. Documents name
     /// fonts this way.
     pub legacy: Option<(String, String)>,
+    /// The family's Korean name from the font's `name` table (나눔고딕), when it has one that
+    /// differs from `family`. Only for display; documents store `family`.
+    pub ko_family: Option<String>,
     /// usWeightClass-style weight (400 = regular).
     pub weight: f32,
     pub italic: bool,
@@ -362,6 +374,15 @@ struct CatalogEntry {
     path: std::path::PathBuf,
 }
 
+/// What the PPM font menu needs from the faces, found once per set of faces: the families with a
+/// bundled face that draws Hangul, those only added at run time, and the Korean family names.
+struct HangulSet {
+    bundled: Vec<String>,
+    runtime: Vec<String>,
+    /// Lowercase family -> its Korean name (the first face that has one).
+    korean: HashMap<String, String>,
+}
+
 /// Process-wide font database.
 pub struct FontDb {
     faces: RwLock<Vec<Arc<FontFace>>>,
@@ -371,6 +392,9 @@ pub struct FontDb {
     replaced: RwLock<Vec<Arc<FontFace>>>,
     uploaded: RwLock<std::collections::HashSet<u32>>,
     outlines: Mutex<HashMap<(u32, u32), Arc<BezPath>>>,
+    /// [`HangulSet`] of the faces it was built for (their count and summed ids): rebuilt only when
+    /// a font is added, not on every repaint of the font menu.
+    hangul: Mutex<Option<((usize, u64), Arc<HangulSet>)>>,
     #[cfg(not(target_arch = "wasm32"))]
     catalog: RwLock<Vec<CatalogEntry>>,
     /// The folders the system font scan reads (the platform's font folders for [`FontDb::global`]).
@@ -455,6 +479,17 @@ fn face_names(f: &skrifa::FontRef<'_>) -> Option<(String, String)> {
 
 /// A face's Windows (GDI) family and style (`name` IDs 1 and 2) when that family differs from the
 /// typographic `family`.
+/// The Korean (`ko`) family name in the `name` table: typographic (ID 16), else legacy (ID 1);
+/// `None` without one, or when it is the English name itself. Bounded in length.
+fn korean_family(f: &skrifa::FontRef<'_>, family: &str) -> Option<String> {
+    [StringId::TYPOGRAPHIC_FAMILY_NAME, StringId::FAMILY_NAME].into_iter().find_map(|id| {
+        f.localized_strings(id)
+            .find(|s| s.language().is_some_and(|l| l.eq_ignore_ascii_case("ko") || l.to_ascii_lowercase().starts_with("ko-")))
+            .map(|s| s.chars().take(128).collect::<String>().trim().to_string())
+            .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(family))
+    })
+}
+
 fn legacy_names(f: &skrifa::FontRef<'_>, family: &str) -> Option<(String, String)> {
     let legacy = name(f, &[StringId::FAMILY_NAME])?;
     if legacy.eq_ignore_ascii_case(family) {
@@ -757,11 +792,13 @@ fn make_face(bytes: FontBytes, index: u32, family: String, style: String, coords
         .or(axis(b"slnt").map(|v| v.abs() > 0.1))
         .unwrap_or(!matches!(a.style, skrifa::attribute::Style::Normal) || style_italic(&style));
     let legacy = if coords.is_empty() { legacy_names(&f, &family) } else { None };
+    let family_for_ko = family.clone();
     Some(FontFace {
         id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         family,
         style,
         legacy,
+        ko_family: if coords.is_empty() { korean_family(&f, &family_for_ko) } else { None },
         weight,
         italic,
         upem: m.units_per_em.max(1) as f64,
@@ -860,6 +897,7 @@ impl FontDb {
             replaced: RwLock::new(Vec::new()),
             uploaded: RwLock::new(std::collections::HashSet::new()),
             outlines: Mutex::new(HashMap::new()),
+            hangul: Mutex::new(None),
             #[cfg(not(target_arch = "wasm32"))]
             catalog: RwLock::new(Vec::new()),
             font_dirs,
@@ -912,6 +950,59 @@ impl FontDb {
         v.sort_by_key(|a| a.to_lowercase());
         v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         v
+    }
+
+    fn hangul_set(&self) -> Arc<HangulSet> {
+        let faces = self.read_faces();
+        let key = (faces.len(), faces.iter().fold(0u64, |a, f| a.wrapping_add(f.id() as u64)));
+        let mut cache = self.hangul.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(set) = cache.as_ref().filter(|(k, _)| *k == key).map(|(_, set)| set.clone()) {
+            return set;
+        }
+        let owned = |f: &FontFace| matches!(f.bytes, FontBytes::Owned(_));
+        let mut set = HangulSet { bundled: Vec::new(), runtime: Vec::new(), korean: HashMap::new() };
+        for f in faces.iter() {
+            let list = if owned(f) {
+                &mut set.runtime
+            } else if f.glyph_for('\u{AC00}') != 0 {
+                &mut set.bundled
+            } else {
+                continue;
+            };
+            if !list.iter().any(|o| o.eq_ignore_ascii_case(&f.family)) {
+                list.push(f.family.clone());
+            }
+        }
+        for f in faces.iter() {
+            if let Some(ko) = &f.ko_family {
+                set.korean.entry(f.family.to_lowercase()).or_insert_with(|| ko.clone());
+            }
+        }
+        set.runtime.retain(|r| !set.bundled.iter().any(|b| b.eq_ignore_ascii_case(r)));
+        let set = Arc::new(set);
+        *cache = Some((key, set.clone()));
+        set
+    }
+
+    /// The families the PPM font menu offers: first those with a bundled face that draws Hangul
+    /// (U+AC00 in the font file's cmap), then those only added at run time (an uploaded font, one
+    /// embedded in a document), which stay whatever they cover. Each part is sorted A-Z by the name
+    /// `label` shows. The faces are examined once per set of faces (see [`HangulSet`]).
+    pub fn hangul_families(&self, label: &dyn Fn(&str) -> String) -> Vec<String> {
+        let set = self.hangul_set();
+        let sorted = |names: &[String]| {
+            let mut v = names.to_vec();
+            v.sort_by_cached_key(|n| label(n).to_lowercase());
+            v
+        };
+        let mut out = sorted(&set.bundled);
+        out.extend(sorted(&set.runtime));
+        out
+    }
+
+    /// The Korean name of `family` from a face's `name` table (나눔고딕), if it has one.
+    pub fn korean_name(&self, family: &str) -> Option<String> {
+        self.hangul_set().korean.get(&family.to_lowercase()).cloned()
     }
 
     /// Style names available for `family` (Regular first, then by weight).
