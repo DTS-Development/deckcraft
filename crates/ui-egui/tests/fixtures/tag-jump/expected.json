@@ -1,0 +1,105 @@
+{
+  "_doc": "jump.docx/.xlsx/.pptx의 기대 위치. 손으로 계산했다(서버 코드가 만든 값이 아님). 규약은 tagjump_spec.md 2절: 문단 글자 = run 글자를 이어 붙인 것(탭 \\t, 줄바꿈 \\n, 필드·인라인 그림/개체는 U+FFFC 한 글자, 지운 글자 w:delText도 센다, 책갈피는 세지 않는다, 여러 문단 목차(TOC) 필드는 결과 글자를 그대로 세고 앞뒤에 U+FFFC 하나씩), occurrence = 범위 안 문단들을 순서대로 보며 text의 겹치지 않는 부분 문자열 일치를 센 순번(1부터). 텍스트 상자 안 문단은 세지 않는다. total은 같은 범위(docx story, pptx slide) 안 text의 전체 일치 수다. scopes는 범위별로 세는 문단 목록이다. data는 검사할 때 template_data로 넣는 값이다. errors/warnings는 서버 검사 결과에 있어야 하는 항목, probes는 포크가 그 위치를 선택했을 때 선택이 들어 있어야 하는 문단이다.",
+  "docx": {
+    "data": { "title": "T", "page": "1", "items": [{ "sku": "A" }] },
+    "scopes": {
+      "body": [
+        "Title {{title}}",
+        "Hello {{name}} and {{ name }}",
+        "Box \uFFFC",
+        "{{name}}",
+        "{{loop items}}{{sku}}",
+        "{{qty}}{{endloop}}",
+        "{{nmae}}",
+        "Split {{name}}",
+        "Field \uFFFC {{name}}",
+        "Gone {{name}} kept {{name}}",
+        "Mark {{name}}",
+        "Mid \uFFFC end {{name}}",
+        "Note {{na\uFFFCme}} {{name}}",
+        "A \uFFFCIntro {{title}}",
+        "Next {{title}}\uFFFC tail",
+        "Rep {{title}} {{title}} {{title}}",
+        "Stray end}}",
+        "Open {{broken tag"
+      ],
+      "header": ["Header two {{name}}", "Header one {{name}}"],
+      "footer": ["Footer {{page}} {{name}}"]
+    },
+    "errors": [
+      { "messageIncludes": "닫는 기호가 없는 태그", "location": { "kind": "docx", "story": "body", "text": "{{broken tag", "occurrence": 1, "total": 1 } },
+      { "messageIncludes": "여는 기호가 없는 태그", "location": { "kind": "docx", "story": "body", "text": "end}}", "occurrence": 1, "total": 1 } }
+    ],
+    "warnings": [
+      { "key": "name", "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 1, "total": 9 } },
+      { "key": "nmae", "location": { "kind": "docx", "story": "body", "text": "{{nmae}}", "occurrence": 1, "total": 1 } },
+      { "key": "items.qty", "location": { "kind": "docx", "story": "body", "text": "{{qty}}", "occurrence": 1, "total": 1 } }
+    ],
+    "probes": [
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 1, "total": 9 }, "paragraph": "Hello {{name}} and {{ name }}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 2, "total": 9 }, "paragraph": "{{name}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 3, "total": 9 }, "paragraph": "Split {{name}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{ name }}", "occurrence": 1, "total": 1 }, "paragraph": "Hello {{name}} and {{ name }}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{loop items}}", "occurrence": 1, "total": 1 }, "paragraph": "{{loop items}}{{sku}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{endloop}}", "occurrence": 1, "total": 1 }, "paragraph": "{{qty}}{{endloop}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 4, "total": 9 }, "paragraph": "Field \uFFFC {{name}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 5, "total": 9 }, "paragraph": "Gone {{name}} kept {{name}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 6, "total": 9 }, "paragraph": "Gone {{name}} kept {{name}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 7, "total": 9 }, "paragraph": "Mark {{name}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 8, "total": 9 }, "paragraph": "Mid \uFFFC end {{name}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{name}}", "occurrence": 9, "total": 9 }, "paragraph": "Note {{na\uFFFCme}} {{name}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{title}}", "occurrence": 1, "total": 6 }, "paragraph": "Title {{title}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{title}}", "occurrence": 2, "total": 6 }, "paragraph": "A \uFFFCIntro {{title}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{title}}", "occurrence": 3, "total": 6 }, "paragraph": "Next {{title}}\uFFFC tail" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{title}}", "occurrence": 4, "total": 6 }, "paragraph": "Rep {{title}} {{title}} {{title}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{title}}", "occurrence": 5, "total": 6 }, "paragraph": "Rep {{title}} {{title}} {{title}}" },
+      { "location": { "kind": "docx", "story": "body", "text": "{{title}}", "occurrence": 6, "total": 6 }, "paragraph": "Rep {{title}} {{title}} {{title}}" },
+      { "location": { "kind": "docx", "story": "header", "text": "{{name}}", "occurrence": 1, "total": 2 }, "paragraph": "Header two {{name}}" },
+      { "location": { "kind": "docx", "story": "header", "text": "{{name}}", "occurrence": 2, "total": 2 }, "paragraph": "Header one {{name}}" },
+      { "location": { "kind": "docx", "story": "footer", "text": "{{page}}", "occurrence": 1, "total": 1 }, "paragraph": "Footer {{page}} {{name}}" },
+      { "location": { "kind": "docx", "story": "footer", "text": "{{name}}", "occurrence": 1, "total": 1 }, "paragraph": "Footer {{page}} {{name}}" }
+    ]
+  },
+  "xlsx": {
+    "data": { "title": "T", "multi": [], "rows": [] },
+    "errors": [
+      { "messageIncludes": "닫는 기호가 없는 태그", "location": { "kind": "xlsx", "sheet": "Detail", "cell": "B3" } },
+      { "messageIncludes": "여는 기호가 없는 태그", "location": { "kind": "xlsx", "sheet": "Detail", "cell": "D5" } },
+      { "messageIncludes": "{{loop rows}}", "location": { "kind": "xlsx", "sheet": "Detail", "cell": "A6" } }
+    ],
+    "warnings": [
+      { "key": "nmae", "location": { "kind": "xlsx", "sheet": "Summary", "cell": "B2" } },
+      { "key": "ghost", "location": { "kind": "xlsx", "sheet": "Detail", "cell": "C4" } },
+      { "key": "{{loop multi}}", "location": { "kind": "xlsx", "sheet": "Summary", "cell": "A5" } }
+    ],
+    "probes": [
+      { "location": { "kind": "xlsx", "sheet": "Detail", "cell": "C4" }, "cell": "{{ghost}}" },
+      { "location": { "kind": "xlsx", "sheet": "Summary", "cell": "B2" }, "cell": "{{nmae}}" }
+    ]
+  },
+  "pptx": {
+    "_doc": "슬라이드 번호는 발표 순서다: 파일 slide3.xml이 1번, slide1.xml이 2번, slide2.xml이 3번.",
+    "data": { "title": "T", "qty": 1 },
+    "scopes": {
+      "1": ["Cover {{title}}", "Open {{broken"],
+      "2": ["{{name}}", "G {{name}}", "{{name}}", "T {{qty}}", "{{name}} and {{qty}}"],
+      "3": ["Total {{nmae}}"]
+    },
+    "errors": [
+      { "messageIncludes": "닫는 기호가 없는 태그", "location": { "kind": "pptx", "slide": 1, "text": "{{broken", "occurrence": 1, "total": 1 } }
+    ],
+    "warnings": [
+      { "key": "name", "location": { "kind": "pptx", "slide": 2, "text": "{{name}}", "occurrence": 1, "total": 4 } },
+      { "key": "nmae", "location": { "kind": "pptx", "slide": 3, "text": "{{nmae}}", "occurrence": 1, "total": 1 } }
+    ],
+    "probes": [
+      { "location": { "kind": "pptx", "slide": 2, "text": "{{name}}", "occurrence": 1, "total": 4 }, "paragraph": "{{name}}" },
+      { "location": { "kind": "pptx", "slide": 2, "text": "{{name}}", "occurrence": 2, "total": 4 }, "paragraph": "G {{name}}" },
+      { "location": { "kind": "pptx", "slide": 2, "text": "{{name}}", "occurrence": 3, "total": 4 }, "paragraph": "{{name}}" },
+      { "location": { "kind": "pptx", "slide": 2, "text": "{{name}}", "occurrence": 4, "total": 4 }, "paragraph": "{{name}} and {{qty}}" },
+      { "location": { "kind": "pptx", "slide": 2, "text": "{{qty}}", "occurrence": 1, "total": 2 }, "paragraph": "T {{qty}}" },
+      { "location": { "kind": "pptx", "slide": 2, "text": "{{qty}}", "occurrence": 2, "total": 2 }, "paragraph": "{{name}} and {{qty}}" },
+      { "location": { "kind": "pptx", "slide": 3, "text": "{{nmae}}", "occurrence": 1, "total": 1 }, "paragraph": "Total {{nmae}}" }
+    ]
+  }
+}
