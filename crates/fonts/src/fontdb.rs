@@ -926,19 +926,25 @@ impl FontDb {
         v
     }
 
-    /// The families the PPM font menu offers: those with a face that draws Hangul (U+AC00 in the
-    /// font file's cmap), and those with a face added at run time (an uploaded font, one embedded
-    /// in a document), which stay whatever they cover. Sorted and deduplicated like [`FontDb::families`].
-    pub fn hangul_families(&self) -> Vec<String> {
-        let mut v: Vec<String> = self
-            .read_faces()
-            .iter()
-            .filter(|f| matches!(f.bytes, FontBytes::Owned(_)) || f.glyph_for('\u{AC00}') != 0)
-            .map(|f| f.family.clone())
-            .collect();
-        v.sort_by_key(|a| a.to_lowercase());
-        v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-        v
+    /// The families the PPM font menu offers: first those with a bundled face that draws Hangul
+    /// (U+AC00 in the font file's cmap), then those only added at run time (an uploaded font, one
+    /// embedded in a document), which stay whatever they cover. Each part is sorted A-Z by the name
+    /// `label` shows, and deduplicated like [`FontDb::families`].
+    pub fn hangul_families(&self, label: &dyn Fn(&str) -> String) -> Vec<String> {
+        let faces = self.read_faces();
+        let part = |keep: &dyn Fn(&FontFace) -> bool| {
+            let mut v: Vec<String> = faces.iter().filter(|f| keep(f)).map(|f| f.family.clone()).collect();
+            v.sort_by_key(|a| label(a).to_lowercase());
+            v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+            v
+        };
+        let mut out = part(&|f| !matches!(f.bytes, FontBytes::Owned(_)) && f.glyph_for('\u{AC00}') != 0);
+        for f in part(&|f| matches!(f.bytes, FontBytes::Owned(_))) {
+            if !out.iter().any(|o| o.eq_ignore_ascii_case(&f)) {
+                out.push(f);
+            }
+        }
+        out
     }
 
     /// The Korean name of `family` from a face's `name` table (나눔고딕), if it has one.

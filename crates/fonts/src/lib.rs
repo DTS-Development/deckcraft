@@ -534,16 +534,25 @@ mod tests {
     fn the_menu_lists_hangul_families_and_added_fonts() {
         let db = FontDb::with_font_dirs(Vec::new());
         db.set_system_fallback(false);
-        let latin_only = db.hangul_families();
+        let same = |n: &str| n.to_string();
+        let latin_only = db.hangul_families(&same);
         // Bundled Latin faces (and the last-resort Ubuntu) draw no Hangul; NanumGothic does when present.
         assert!(!latin_only.iter().any(|f| matches!(f.as_str(), "Ubuntu" | "Inter" | "Carlito" | "Liberation Sans")), "{latin_only:?}");
         assert_eq!(latin_only.iter().any(|f| f == "NanumGothic"), CRAFT_FONTS.iter().any(|f| f.family == "NanumGothic"));
         // An added font stays whatever it covers (here an English-only face), under the name it was given.
         let ubuntu = epaint_default_fonts::UBUNTU_LIGHT.to_vec();
         assert!(db.add_uploaded_font(ubuntu, "Company Sans") > 0);
-        let with_upload = db.hangul_families();
-        assert!(with_upload.iter().any(|f| f == "Company Sans"), "{with_upload:?}");
-        assert!(with_upload.windows(2).all(|w| w[0].to_lowercase() <= w[1].to_lowercase()), "sorted: {with_upload:?}");
+        let with_upload = db.hangul_families(&same);
+        assert_eq!(with_upload.last().map(String::as_str), Some("Company Sans"), "{with_upload:?}");
+        // Bundled part first, then the run-time part, each sorted A-Z by the name shown.
+        let bundled = &with_upload[..with_upload.len() - 1];
+        assert!(bundled.windows(2).all(|w| w[0].to_lowercase() <= w[1].to_lowercase()), "sorted: {with_upload:?}");
+        // Sorting follows the label: a Korean label moves NanumGothic after Latin names.
+        if bundled.len() > 1 {
+            let ko = |n: &str| if n == "NanumGothic" { "\u{B098}\u{B214}".to_string() } else { n.to_string() };
+            let by_label = db.hangul_families(&ko);
+            assert_eq!(by_label.iter().filter(|f| *f != "Company Sans").last().map(String::as_str), Some("NanumGothic"), "{by_label:?}");
+        }
     }
 
     #[test]

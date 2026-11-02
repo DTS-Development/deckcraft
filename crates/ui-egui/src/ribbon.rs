@@ -495,7 +495,7 @@ pub fn font_label(family: &str) -> String {
 pub fn font_families(app: &SlideApp) -> Vec<String> {
     // The dialogs have no theme entries of their own, so the PPM build's list there is the Hangul one alone.
     if deckcraft_engine::hostlock::HOST_BUILD {
-        return deckcraft_fonts::FontDb::global().hangul_families();
+        return deckcraft_fonts::FontDb::global().hangul_families(&font_label);
     }
     font_families_for(app, "")
 }
@@ -512,7 +512,7 @@ pub fn font_families_for(app: &SlideApp, current: &str) -> Vec<String> {
     }
     if deckcraft_engine::hostlock::HOST_BUILD {
         let theme = v.len();
-        v.extend(deckcraft_fonts::FontDb::global().hangul_families());
+        v.extend(deckcraft_fonts::FontDb::global().hangul_families(&font_label));
         if !current.trim().is_empty() && !v.iter().any(|f| f.eq_ignore_ascii_case(current)) {
             v.insert(theme, current.to_string());
         }
