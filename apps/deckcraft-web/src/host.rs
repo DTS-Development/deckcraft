@@ -376,6 +376,17 @@ impl Bridge {
         if self.window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref()).is_ok() {
             on_key.forget();
         }
+        // Ctrl/Cmd+F and H are the editor's find and replace; the browser's find bar (and
+        // history) must not open on top. Capture phase, so it holds even if something below stops
+        // the event; it only cancels the default and never stops the event, so the app gets the key.
+        let on_find_key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(|event: web_sys::KeyboardEvent| {
+            if crate::gate::blocks_page_default(event.ctrl_key(), event.meta_key(), event.alt_key(), &event.key(), &event.code()) {
+                event.prevent_default();
+            }
+        });
+        if self.window.add_event_listener_with_callback_and_bool("keydown", on_find_key.as_ref().unchecked_ref(), true).is_ok() {
+            on_find_key.forget();
+        }
     }
 
     fn listen(&self, ctx: egui::Context) {
