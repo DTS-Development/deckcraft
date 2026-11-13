@@ -21,12 +21,13 @@ pub fn decide(host_build: bool, host_param: Option<&str>, has_bridge: bool) -> S
 #[cfg_attr(not(feature = "ppm-host"), allow(dead_code))]
 const BROWSER_CLASHING_LETTERS: [char; 2] = ['f', 'h'];
 
-/// Whether a key press is one of those shortcuts: Ctrl or Cmd held, no Alt, and one of the letters
+/// Whether a key press is one of those shortcuts: Ctrl or Cmd held (not both), no Alt, and one of the letters
 /// above (Shift allowed). `code` is the physical key, for layouts whose
 /// `key` is not a Latin letter. Plain typing and the clipboard keys (C, V, X) are never matched.
 #[cfg_attr(not(feature = "ppm-host"), allow(dead_code))]
 pub fn blocks_page_default(ctrl: bool, meta: bool, alt: bool, key: &str, code: &str) -> bool {
-    if !(ctrl || meta) || alt {
+    // Ctrl and Cmd together is the Mac's full-screen (Ctrl+Cmd+F), not a shortcut of the editor.
+    if ctrl == meta || alt {
         return false;
     }
     let by_key = key.chars().count() == 1 && key.chars().next().is_some_and(|c| BROWSER_CLASHING_LETTERS.contains(&c.to_ascii_lowercase()));
@@ -76,6 +77,7 @@ mod tests {
         assert!(!blocks_page_default(false, false, false, "f", "KeyF"), "plain typing");
         assert!(!blocks_page_default(false, false, false, "G", "KeyG"), "Shift only");
         assert!(!blocks_page_default(true, false, true, "f", "KeyF"), "Ctrl+Alt+F");
+        assert!(!blocks_page_default(true, true, false, "f", "KeyF"), "Ctrl+Cmd+F is full screen on a Mac");
         for (k, c) in [("c", "KeyC"), ("v", "KeyV"), ("x", "KeyX"), ("a", "KeyA"), ("z", "KeyZ"), ("Enter", "Enter"), ("Control", "ControlLeft")] {
             assert!(!blocks_page_default(true, false, false, k, c), "Ctrl+{k}");
             assert!(!blocks_page_default(false, true, false, k, c), "Cmd+{k}");
