@@ -16,6 +16,19 @@ type Harness = egui_kittest::Harness<'static, SlideApp>;
 const READ_ONLY: ViewOptions = ViewOptions { read_only: true, chrome: true, zoom_controls: false };
 
 fn harness() -> (Harness, Inbox) {
+    harness_with(Services::default())
+}
+
+/// A harness whose downloads (what reaches the parent as a save) are counted.
+fn harness_counting() -> (Harness, Inbox, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = n.clone();
+    let services = Services { download: Some(Box::new(move |_, _| drop(seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst)))), ..Default::default() };
+    let (h, inbox) = harness_with(services);
+    (h, inbox, n)
+}
+
+fn harness_with(services: Services) -> (Harness, Inbox) {
     let inbox = Inbox::default();
     let mut session = Session::with_new();
     session.lock_host();
@@ -24,7 +37,7 @@ fn harness() -> (Harness, Inbox) {
             app.logic(ui.ctx());
             app.ui(ui);
         },
-        SlideApp::new(session, Services { inbox: Some(inbox.clone()), ..Default::default() }),
+        SlideApp::new(session, Services { inbox: Some(inbox.clone()), ..services }),
     );
     h.run_steps(3);
     (h, inbox)
@@ -221,4 +234,101 @@ fn a_read_only_app_has_no_right_click() {
     let mut raw = egui::RawInput { events: vec![secondary(), primary()], ..Default::default() };
     h.state_mut().raw_input_hook(&mut raw);
     assert_eq!(raw.events.len(), 1, "the right click is dropped, the left stays");
+}
+
+fn view(app: &SlideApp) -> ViewOptions {
+    app.view()
+}
+
+#[test]
+fn read_only_belongs_to_each_presentation_when_the_host_opens_another_over_it() {
+    // A read-only, then B with no options on top of it (the host never closes A); back to A.
+    let (mut h, inbox) = harness();
+    open(&mut h, &inbox, pptx(), READ_ONLY);
+    let a = h.state().session.active_index().unwrap();
+    let (id, text) = text_box(h.state());
+    open(&mut h, &inbox, pptx(), ViewOptions::default());
+    let b = h.state().session.active_index().unwrap();
+    assert_ne!(a, b, "the host's open adds a presentation");
+    assert!(!h.state().read_only() && view(h.state()) == ViewOptions::default());
+    h.state_mut().session.set_active(a);
+    h.run_steps(2);
+    assert!(h.state().read_only() && view(h.state()) == READ_ONLY, "A is read-only again");
+    let before = fingerprint(h.state());
+    h.state_mut().run("text.edit", json!({"id": id})).ok();
+    typed(&mut h);
+    for cmd in ["slide.new", "edit.paste", "format.bold", "file.save"] {
+        assert!(h.state_mut().run(cmd, json!({})).is_err(), "{cmd} ran in A");
+    }
+    assert_eq!(fingerprint(h.state()), before, "A was edited");
+    assert_eq!(text_box(h.state()).1, text);
+    // B is editable and its edits are reported; A's never are.
+    h.state_mut().session.set_active(b);
+    h.run_steps(2);
+    assert!(!h.state().read_only());
+    h.state_mut().run("slide.new", json!({})).unwrap();
+    let docs = h.state().session.documents();
+    assert!(docs[b].is_dirty() && !h.state().session.doc_read_only(docs[b].uid));
+    assert!(!docs[a].is_dirty() && h.state().session.doc_read_only(docs[a].uid));
+}
+
+#[test]
+fn a_read_only_presentation_hands_nothing_to_the_page_to_save() {
+    let (mut h, inbox, downloads) = harness_counting();
+    open(&mut h, &inbox, pptx(), READ_ONLY);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::S);
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
+    h.run_steps(3);
+    h.state_mut().save();
+    h.state_mut().save_as_dialog("pptx");
+    h.state_mut().save_as_dialog("deckcraft");
+    assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing was downloaded");
+    // The control: an editable one does save.
+    open(&mut h, &inbox, pptx(), ViewOptions::default());
+    h.state_mut().save_as_dialog("pptx");
+    assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_read_only_presentation_prints_when_the_host_allows_it_and_has_no_other_file_page() {
+    use crate::backstage::Page;
+    let (mut h, inbox, downloads) = harness_counting();
+    open(&mut h, &inbox, pptx(), READ_ONLY);
+    let page = |h: &Harness| h.state().backstage.as_ref().map(|b| b.page);
+    // The host's default: no printing, so nothing opens.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::P);
+    h.run_steps(2);
+    assert_eq!(page(&h), None);
+    assert!(!h.state_mut().print_pdf(json!({})));
+    // The host allows it: Ctrl+P and the File tab open Print, and no other page.
+    h.state_mut().session.set_policy(&[("app.print".into(), true)]);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::P);
+    h.run_steps(2);
+    assert_eq!(page(&h), Some(Page::Print));
+    for p in [Page::Info, Page::SaveAs, Page::Export, Page::Home] {
+        h.state_mut().open_backstage(p);
+        h.run_steps(2);
+        assert_eq!(page(&h), Some(Page::Print), "{p:?} is not for a read-only presentation");
+    }
+    h.state_mut().close_backstage();
+    assert!(h.state_mut().run("app.backstage", json!({"page": "export"})).is_ok());
+    h.run_steps(2);
+    assert_eq!(page(&h), Some(Page::Print));
+    assert!(h.state_mut().print_pdf(json!({})), "printing follows the policy");
+    assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1, "the PDF, and only it");
+}
+
+#[test]
+fn the_ribbon_greys_what_a_read_only_app_refuses_and_a_synthetic_right_click_is_dropped() {
+    let (mut h, inbox) = harness();
+    open(&mut h, &inbox, pptx(), ViewOptions::default());
+    assert!(crate::ribbon::enabled(h.state(), "slide.new") && crate::ribbon::enabled(h.state(), "view.pane"));
+    open(&mut h, &inbox, pptx(), READ_ONLY);
+    assert!(!crate::ribbon::enabled(h.state(), "slide.new") && !crate::ribbon::enabled(h.state(), "view.pane"));
+    assert!(crate::ribbon::enabled(h.state(), "view.zoomIn"));
+    // The control channel's right click comes through the hook too.
+    h.state_mut().synthetic.push(Event::PointerButton { pos: egui::pos2(300.0, 300.0), button: egui::PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+    let mut raw = egui::RawInput::default();
+    h.state_mut().raw_input_hook(&mut raw);
+    assert!(raw.events.iter().all(|e| !matches!(e, Event::PointerButton { button: egui::PointerButton::Secondary, .. })));
 }

@@ -579,8 +579,13 @@ pub struct SlideApp {
     last_open_ok: Option<bool>,
     /// The policy the PPM host sent (overrides of the default grades), when the session is locked to its host.
     host: Option<Policy>,
-    /// How the open presentation is shown (read-only, no surrounding interface, zoom buttons).
+    /// How the active presentation is shown (no surrounding interface, zoom buttons; read-only is
+    /// the session's, see [`SlideApp::read_only`]). Follows the active presentation, see
+    /// [`SlideApp::sync_view`].
     view: ViewOptions,
+    /// What the host asked for each presentation it opened (by uid); one it sent no options for
+    /// has none and shows as it always has.
+    views: std::collections::HashMap<u64, ViewOptions>,
 }
 
 fn grid_options_touched(p: &Value) -> bool {
@@ -656,6 +661,7 @@ impl SlideApp {
             pending_files: Vec::new(),
             last_open_ok: None,
             view: ViewOptions::default(),
+            views: Default::default(),
         }
     }
 
@@ -675,15 +681,34 @@ impl SlideApp {
         self.view
     }
 
-    /// Nothing edits the presentation and nothing is saved.
+    /// Nothing edits the active presentation and nothing is saved. The engine holds it per
+    /// presentation, so it can't lag behind a switch to another one.
     pub fn read_only(&self) -> bool {
-        self.view.read_only
+        self.session.read_only()
     }
 
-    /// Shows the presentation as `view` says, from now on. The engine refuses edits and saves
-    /// while it is read-only; what is half-done (a text being edited, a tool, a dialog, a pane)
-    /// ends here so the first read-only frame is the plain slide.
+    /// Shows the active presentation as `view` says, from now on, and remembers it for that
+    /// presentation. The engine refuses edits and saves while it is read-only; what is half-done
+    /// (a text being edited, a tool, a dialog, a pane) ends here so the first read-only frame is
+    /// the plain slide.
     pub fn set_view(&mut self, view: ViewOptions) {
+        if let Some(uid) = self.session.active().map(|d| d.uid) {
+            self.views.insert(uid, view);
+        }
+        self.apply_view(view);
+    }
+
+    /// Shows what the host asked for the active presentation: another one became active (a tab,
+    /// Cmd+`, one closed), so its options replace the last one's.
+    fn sync_view(&mut self) {
+        let Some(uid) = self.session.active().map(|d| d.uid) else { return };
+        let view = self.views.get(&uid).copied().unwrap_or_default();
+        if view != self.view {
+            self.apply_view(view);
+        }
+    }
+
+    fn apply_view(&mut self, view: ViewOptions) {
         self.view = view;
         self.session.set_read_only(view.read_only);
         if view.read_only {
@@ -796,7 +821,7 @@ impl SlideApp {
     /// Run a command by id (UI commands here, everything else in the engine). Errors show in the
     /// status bar and are returned.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
-        let r = if self.view.read_only && UI_COMMANDS.iter().any(|c| c.0 == id) && !view_only::permits(id) {
+        let r = if self.read_only() && UI_COMMANDS.iter().any(|c| c.0 == id) && !view_only::permits(id) {
             // A read-only app refuses what edits or opens an editing dialog, as quietly as the lock.
             return Err(format!("command `{id}` is {}", hostlock::BLOCKED_TEXT));
         } else if !self.allowed(id) && UI_COMMANDS.iter().any(|c| c.0 == id) {
@@ -820,6 +845,7 @@ impl SlideApp {
             Err(e) => self.set_status(e.clone()),
         }
         self.drain_requests();
+        self.sync_view();
         r
     }
 
@@ -837,6 +863,18 @@ impl SlideApp {
     pub fn open_backstage(&mut self, page: backstage::Page) {
         // A locked app shows its first page for one it doesn't have (there is always a presentation).
         let page = if self.page_allowed(page) { page } else { backstage::fallback_page(self) };
+        // A read-only presentation has only the Print page (when the host allows printing), the one
+        // thing in the File tab that doesn't change or hand over the presentation itself.
+        if self.read_only() {
+            if !self.page_allowed(backstage::Page::Print) {
+                return;
+            }
+            return self.open_backstage_on(backstage::Page::Print);
+        }
+        self.open_backstage_on(page);
+    }
+
+    fn open_backstage_on(&mut self, page: backstage::Page) {
         let key = self.docs_key();
         match &mut self.backstage {
             Some(b) => b.go(page),
@@ -1443,6 +1481,10 @@ impl SlideApp {
     }
 
     pub fn save_as_dialog(&mut self, format: &str) {
+        // A read-only presentation hands nothing to the page to save, by any shortcut or button.
+        if self.read_only() {
+            return;
+        }
         let name = self.session.active().map(|d| d.title()).unwrap_or_else(|| "Presentation".into());
         let web_pptx = self.services.pick_save.is_none() && self.services.save_as_pptx;
         let ext = if format == "pptx" || web_pptx { "pptx" } else { "deckcraft" };
@@ -1483,6 +1525,9 @@ impl SlideApp {
     }
 
     pub fn save(&mut self) {
+        if self.read_only() {
+            return;
+        }
         if self.session.active().and_then(|d| d.path.clone()).is_some() {
             match self.session.execute("file.save", &json!({})) {
                 Ok(_) => self.set_status(tl!("Saved")),
@@ -1728,6 +1773,7 @@ impl SlideApp {
 
     /// Per-frame logic before layout: styles, control requests, screenshots, shortcuts.
     pub fn logic(&mut self, ctx: &egui::Context) {
+        self.sync_view();
         let scale = self.ui.ui_scale.clamp(0.5, 3.0);
         if (ctx.zoom_factor() - scale).abs() > 1e-3 {
             ctx.set_zoom_factor(scale);
@@ -1828,7 +1874,7 @@ impl SlideApp {
     /// An input method's event for the slide's text (#101): the preedit is shown in the text and
     /// replaced on each update; the commit replaces it as one undo step.
     fn ime_event(&mut self, e: &egui::ImeEvent) {
-        if self.view.read_only {
+        if self.read_only() {
             return;
         }
         let r = match e {
@@ -1850,22 +1896,22 @@ impl SlideApp {
 
     /// Inject synthetic events (one pointer event per frame).
     pub fn raw_input_hook(&mut self, raw: &mut egui::RawInput) {
-        if self.view.read_only {
-            // No context menu in a read-only app: a right click would show editing entries.
+        if !self.synthetic.is_empty() {
+            let n = match self.synthetic.first() {
+                Some(egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }) => 1,
+                _ => self.synthetic.iter().position(|e| matches!(e, egui::Event::Key { pressed: false, .. })).map_or(self.synthetic.len(), |i| i + 1),
+            };
+            if let Some(egui::Event::PointerMoved(p) | egui::Event::PointerButton { pos: p, .. }) = self.synthetic.first() {
+                raw.events.push(egui::Event::PointerMoved(*p));
+            }
+            let n = n.min(self.synthetic.len());
+            raw.events.extend(self.synthetic.drain(..n));
+        }
+        if self.read_only() {
+            // No context menu in a read-only app, from the window or the control channel: a right
+            // click would show editing entries.
             raw.events.retain(|e| !matches!(e, egui::Event::PointerButton { button: egui::PointerButton::Secondary, .. }));
         }
-        if self.synthetic.is_empty() {
-            return;
-        }
-        let n = match self.synthetic.first() {
-            Some(egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }) => 1,
-            _ => self.synthetic.iter().position(|e| matches!(e, egui::Event::Key { pressed: false, .. })).map_or(self.synthetic.len(), |i| i + 1),
-        };
-        if let Some(egui::Event::PointerMoved(p) | egui::Event::PointerButton { pos: p, .. }) = self.synthetic.first() {
-            raw.events.push(egui::Event::PointerMoved(*p));
-        }
-        let n = n.min(self.synthetic.len());
-        raw.events.extend(self.synthetic.drain(..n));
     }
 
     /// Keyboard and clipboard for the slide (when no text field has focus).
@@ -1912,14 +1958,14 @@ impl SlideApp {
             self.drain_requests();
             return;
         }
-        let img = if image_paste && !self.view.read_only { self.services.clipboard_image.as_mut().and_then(|f| f()) } else { None };
+        let img = if image_paste && !self.read_only() { self.services.clipboard_image.as_mut().and_then(|f| f()) } else { None };
         if let Some(png) = img {
             let data = deckcraft_engine::cmd::base64_encode(&png);
             if let Err(e) = self.session.execute("insert.picture", &json!({"name": "Pasted image.png", "data": data})) {
                 self.set_status(e.to_string());
             }
         }
-        let read_only = self.view.read_only;
+        let read_only = self.read_only();
         for e in events {
             match e {
                 // A read-only slide takes no typing, no input method and no paste or cut; copy and keys stay.
@@ -2032,8 +2078,16 @@ impl SlideApp {
         self.sync_backstage();
         self.keyboard(&ctx);
         self.sync_backstage();
+        // A read-only app's File tab shows the Print page only, however it got to another one.
+        if self.read_only() && self.backstage.is_some() && self.session.active().is_some() {
+            if !self.page_allowed(backstage::Page::Print) {
+                self.backstage = None;
+            } else if let Some(b) = self.backstage.as_mut().filter(|b| b.page != backstage::Page::Print) {
+                b.go(backstage::Page::Print);
+            }
+        }
         // A read-only app opens no dialog that edits, whichever way it was asked for.
-        if self.view.read_only && self.dialog.as_ref().is_some_and(|d| !matches!(d.id.as_str(), "about" | "zoom" | "find")) {
+        if self.read_only() && self.dialog.as_ref().is_some_and(|d| !matches!(d.id.as_str(), "about" | "zoom" | "find")) {
             self.dialog = None;
         }
         let chrome = self.view.chrome;

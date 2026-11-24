@@ -346,7 +346,8 @@ impl Bridge {
                 doc.title = std::path::Path::new(name).file_stem().map_or_else(|| name.clone(), |s| s.to_string_lossy().to_string());
             }
         }
-        let dirty = crate::gate::reported_dirty(app.session.documents().iter().any(|d| d.is_dirty()), app.read_only());
+        // Per presentation: a read-only one has nothing to report, an editable one open beside it does.
+        let dirty = app.session.documents().iter().any(|d| crate::gate::reported_dirty(d.is_dirty(), app.session.doc_read_only(d.uid)));
         if self.reported.get() != Some(dirty) && self.send(&[("type", "deckcraft:dirty".into()), ("dirty", dirty.into())]) {
             self.reported.set(Some(dirty));
         }

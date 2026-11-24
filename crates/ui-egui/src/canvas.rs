@@ -752,7 +752,10 @@ fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf) {
     } else {
         Ok(serde_json::Value::Null)
     };
-    if let Err(e) = r {
+    // A read-only slide refuses a drag every frame, quietly (like the lock's refusals).
+    if let Err(e) = r
+        && !matches!(e, deckcraft_engine::EngineError::HostLocked(_))
+    {
         app.set_status(e.to_string());
     }
     // Cursor.
@@ -807,10 +810,16 @@ fn overlays(app: &mut SlideApp, ui: &Ui, painter: &egui::Painter, xf: Xf, t: &To
             crate::squiggles::paint(painter, xf.to_screen(a), xf.to_screen(b), scale);
         }
     }
+    let read_only = app.read_only();
     let Some(st) = app.session.active() else { return };
     let sel_stroke = Stroke::new(1.0, t.selection);
     let editing = st.selection.text.clone();
     for id in &st.selection.shapes {
+        // A read-only slide has no selection box or handles (nothing to move, size or rotate) and no
+        // caret; a selected text still shows highlighted, to copy from.
+        if read_only {
+            break;
+        }
         let Some(sh) = st.shape(*id) else { continue };
         let x = deckcraft_engine::cmd::xfrm_of(&st.doc, &st.selection, sh);
         let a = x.affine();
@@ -905,7 +914,7 @@ fn overlays(app: &mut SlideApp, ui: &Ui, painter: &egui::Painter, xf: Xf, t: &To
         for (a, b, thick) in deckcraft_engine::cmd::text::composition_underlines(st) {
             painter.line_segment([xf.to_screen(a), xf.to_screen(b)], Stroke::new(if thick { 2.0 } else { 1.0 }, t.caret));
         }
-        if !ts.is_range() {
+        if !ts.is_range() && !read_only {
             let blink = (ui.input(|i| i.time) * 1.6).fract() < 0.6;
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
             // An empty placeholder shows the caret where typing begins too.

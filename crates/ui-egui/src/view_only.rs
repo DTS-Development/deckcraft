@@ -28,7 +28,9 @@ impl Default for ViewOptions {
 pub const UI_OK: &[&str] = &[
     "animation.preview",
     "app.about",
+    "app.backstage",
     "app.find",
+    "app.print",
     "show.end",
     "show.presenter",
     "show.start",
@@ -48,7 +50,6 @@ pub const UI_OK: &[&str] = &[
 
 /// App commands a view-only app refuses: dialogs and panes that edit, files, printing, settings.
 pub const UI_REFUSED: &[&str] = &[
-    "app.backstage",
     "app.browseThemeDialog",
     "app.changePictureDialog",
     "app.closePresentation",
@@ -64,7 +65,6 @@ pub const UI_REFUSED: &[&str] = &[
     "app.palette",
     "app.pasteSpecial",
     "app.preferences",
-    "app.print",
     "app.qat",
     "app.replace",
     "app.reuseSlidesDialog",
@@ -84,7 +84,12 @@ pub const UI_REFUSED: &[&str] = &[
 
 /// May a view-only app run the app command `id`? An id nobody classified is refused.
 pub fn permits(id: &str) -> bool {
-    UI_OK.contains(&id)
+    UI_OK.binary_search(&id).is_ok()
+}
+
+/// Is `id` an app command a view-only app refuses?
+pub fn refused(id: &str) -> bool {
+    UI_REFUSED.binary_search(&id).is_ok()
 }
 
 #[cfg(test)]
@@ -107,7 +112,9 @@ mod tests {
 
     #[test]
     fn no_command_that_opens_or_saves_a_file_is_ok() {
-        for id in UI_OK {
+        // Printing follows the host's policy, which the lock checks after this; the File tab a
+        // read-only app shows has only the Print page (see `SlideApp::open_backstage`).
+        for id in UI_OK.iter().filter(|id| !matches!(**id, "app.print" | "app.backstage")) {
             assert!(!matches!(crate::host_lock::grade(id), Some(deckcraft_engine::hostlock::Grade::Locked | deckcraft_engine::hostlock::Grade::Off)), "`{id}` is a file command");
         }
     }

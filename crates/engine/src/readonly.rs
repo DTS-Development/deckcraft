@@ -341,7 +341,12 @@ pub const REFUSED: &[&str] = &[
 
 /// Whether a view-only session runs the engine command `id`; an id nobody classified is refused.
 pub fn permits(id: &str) -> bool {
-    OK.contains(&id)
+    OK.binary_search(&id).is_ok()
+}
+
+/// Is `id` a command a view-only presentation refuses?
+pub fn refused(id: &str) -> bool {
+    REFUSED.binary_search(&id).is_ok()
 }
 
 #[cfg(test)]
@@ -442,6 +447,30 @@ mod tests {
         s.set_read_only(true);
         assert!(s.execute("slide.new", &Json::Null).is_err());
         assert!(s.execute("slide.next", &Json::Null).is_ok());
+    }
+
+    #[test]
+    fn view_only_belongs_to_the_presentation_not_the_session() {
+        // A view-only, then an editable B opened over it (the host never closes A): switching back
+        // to A finds it view-only again, and B stays editable.
+        let mut s = deck();
+        let a = s.active().unwrap().uid;
+        let before = fingerprint(&s);
+        let before = (before.0, before.1, before.2);
+        s.add_document(crate::DocState::new(Default::default(), None, "B".into()));
+        assert!(!s.read_only(), "B was opened without the option");
+        s.execute("slide.new", &json!({})).unwrap();
+        s.set_active(0);
+        assert!(s.read_only() && s.doc_read_only(a));
+        assert!(s.execute("slide.new", &json!({})).is_err());
+        assert!(s.execute("text.insert", &json!({"text": "x"})).is_err());
+        assert!(s.edit(|_, _| Ok(())).is_err(), "the pointer tools' gate follows the active presentation too");
+        let after = fingerprint(&s);
+        assert_eq!((after.0, after.1, after.2), before, "A was not edited from B's session");
+        s.set_active(1);
+        assert!(!s.read_only());
+        s.close_document(0);
+        assert!(!s.doc_read_only(a), "a closed presentation leaves nothing behind");
     }
 
     #[test]
