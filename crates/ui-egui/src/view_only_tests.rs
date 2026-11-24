@@ -345,3 +345,29 @@ fn a_closed_presentation_leaves_no_options_behind() {
     assert_eq!(h.state().views.len(), 1, "the closed presentation's options were dropped");
     assert!(!h.state().views.values().any(|v| v.read_only));
 }
+
+#[test]
+fn the_command_palette_goes_back_to_an_earlier_presentation() {
+    // The way back to A in a browser: Cmd+Shift+P, "next window", Enter (Cmd+` is only a label
+    // in the command list; the app has no key handler for it).
+    let (mut h, inbox) = harness();
+    open(&mut h, &inbox, pptx(), READ_ONLY);
+    let a = h.state().session.active_index().unwrap();
+    open(&mut h, &inbox, pptx(), ViewOptions::default());
+    assert_ne!(h.state().session.active_index(), Some(a));
+    for _ in 0..3 {
+        if h.state().session.active_index() == Some(a) {
+            break;
+        }
+        h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
+        h.run_steps(2);
+        for c in "next window".chars() {
+            h.event(Event::Text(c.to_string()));
+        }
+        h.run_steps(2);
+        h.key_press(Key::Enter);
+        h.run_steps(3);
+    }
+    assert_eq!(h.state().session.active_index(), Some(a), "the palette's Next Window reached A");
+    assert!(h.state().read_only(), "and A is read-only again");
+}
