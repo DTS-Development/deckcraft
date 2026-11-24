@@ -701,6 +701,9 @@ impl SlideApp {
     /// Shows what the host asked for the active presentation: another one became active (a tab,
     /// Cmd+`, one closed), so its options replace the last one's.
     fn sync_view(&mut self) {
+        // A closed presentation's options go with it (a handful of presentations, so a scan).
+        let docs = self.session.documents();
+        self.views.retain(|uid, _| docs.iter().any(|d| d.uid == *uid));
         let Some(uid) = self.session.active().map(|d| d.uid) else { return };
         let view = self.views.get(&uid).copied().unwrap_or_default();
         if view != self.view {

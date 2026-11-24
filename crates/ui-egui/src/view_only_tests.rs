@@ -332,3 +332,16 @@ fn the_ribbon_greys_what_a_read_only_app_refuses_and_a_synthetic_right_click_is_
     h.state_mut().raw_input_hook(&mut raw);
     assert!(raw.events.iter().all(|e| !matches!(e, Event::PointerButton { button: egui::PointerButton::Secondary, .. })));
 }
+
+#[test]
+fn a_closed_presentation_leaves_no_options_behind() {
+    let (mut h, inbox) = harness();
+    open(&mut h, &inbox, pptx(), READ_ONLY);
+    let a = h.state().session.documents().len() - 1;
+    open(&mut h, &inbox, pptx(), ViewOptions { read_only: false, chrome: false, zoom_controls: false });
+    assert_eq!(h.state().views.len(), 2);
+    h.state_mut().session.close_document(a);
+    h.run_steps(2);
+    assert_eq!(h.state().views.len(), 1, "the closed presentation's options were dropped");
+    assert!(!h.state().views.values().any(|v| v.read_only));
+}
