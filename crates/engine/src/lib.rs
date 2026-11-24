@@ -22,6 +22,7 @@ pub mod io;
 pub mod keys;
 pub mod links;
 pub mod media_refs;
+pub mod readonly;
 pub mod recovery;
 pub mod sample;
 pub mod sounds;
@@ -485,6 +486,10 @@ pub struct Session {
     /// The PPM host lock: `Some` once locked (always in the `ppm-host` build), holding the parent's
     /// overrides of the default grades. Locking is one way.
     host: Option<hostlock::Policy>,
+    /// The view-only presentations (by uid): while one is active only the commands in
+    /// [`readonly::OK`] run and nothing edits it, whatever the host lock allows. The host sets it
+    /// per presentation, and a presentation keeps it when another one is opened over it.
+    read_only: std::collections::HashSet<u64>,
     /// The next outermost command skips the host lock (the parent's own file, see
     /// [`Session::open_host_file`]).
     trusted: bool,
@@ -520,6 +525,7 @@ impl Session {
             loaded: vec![],
             next_loaded: 0,
             host: hostlock::HOST_BUILD.then(hostlock::Policy::default),
+            read_only: Default::default(),
             trusted: false,
         }
     }
@@ -530,6 +536,24 @@ impl Session {
     }
     pub fn host_locked(&self) -> bool {
         self.host.is_some()
+    }
+    /// Makes the active presentation view-only (or editable again): see [`readonly`]. Nothing
+    /// to do without one.
+    pub fn set_read_only(&mut self, on: bool) {
+        let Some(uid) = self.active().map(|d| d.uid) else { return };
+        if on {
+            self.read_only.insert(uid);
+        } else {
+            self.read_only.remove(&uid);
+        }
+    }
+    /// Is the active presentation view-only?
+    pub fn read_only(&self) -> bool {
+        self.active().is_some_and(|d| self.read_only.contains(&d.uid))
+    }
+    /// Is presentation `uid` view-only?
+    pub fn doc_read_only(&self, uid: u64) -> bool {
+        self.read_only.contains(&uid)
     }
     /// The parent's overrides of a locked session; clones share their state.
     pub fn host_policy(&self) -> Option<hostlock::Policy> {
@@ -612,6 +636,7 @@ impl Session {
     pub fn close_document(&mut self, i: usize) {
         if i < self.docs.len() {
             let d = self.docs.remove(i);
+            self.read_only.remove(&d.uid);
             if let Some(dir) = &self.recovery_dir {
                 recovery::discard(dir, d.uid);
             }
@@ -627,7 +652,7 @@ impl Session {
     /// presentation as it was.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         // Commands run by commands (depth > 0) were allowed with the outermost one.
-        if self.depth == 0 && !self.trusted && !hostlock::permits(self.host.as_ref(), id, params) {
+        if self.depth == 0 && !self.trusted && ((self.read_only() && !readonly::permits(id)) || !hostlock::permits(self.host.as_ref(), id, params)) {
             return Err(EngineError::HostLocked(id.into()));
         }
         self.guarded(id, |s| s.execute_unguarded(id, params))
@@ -694,6 +719,10 @@ impl Session {
 
     /// Mutate the active presentation (copy-on-write) and bump the revision.
     pub fn edit<T>(&mut self, f: impl FnOnce(&mut Presentation, &mut Selection) -> Result<T>) -> Result<T> {
+        // The pointer tools edit from outside any command; a view-only session refuses them here.
+        if self.depth == 0 && self.read_only() {
+            return Err(EngineError::HostLocked("edit".into()));
+        }
         let st = self.doc_mut()?;
         let mut doc = (*st.doc).clone();
         let mut sel = st.selection.clone();

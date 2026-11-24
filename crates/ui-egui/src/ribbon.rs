@@ -42,6 +42,10 @@ pub fn known(id: &str) -> bool {
 }
 
 pub fn enabled(app: &SlideApp, id: &str) -> bool {
+    // A read-only app greys what it would refuse instead of leaving buttons that do nothing.
+    if app.read_only() && (deckcraft_engine::readonly::refused(id) || crate::view_only::refused(id)) {
+        return false;
+    }
     match deckcraft_engine::find_command(id) {
         Some(c) => (c.enabled)(&app.session).is_ok(),
         None => crate::UI_COMMANDS.iter().any(|c| c.0 == id),

@@ -91,6 +91,31 @@ pub fn status_bar(app: &mut SlideApp, ui: &mut Ui) {
     });
 }
 
+/// The zoom buttons a host asked for (`zoomControls`) when the status bar is hidden: fit, zoom out,
+/// the zoom, zoom in, small in the bottom right corner of the window. They run the status bar's
+/// commands, which a read-only app allows.
+pub fn zoom_controls(app: &mut SlideApp, ctx: &egui::Context) {
+    let t = Tokens::get(ctx);
+    egui::Area::new(egui::Id::new("zoom_controls")).anchor(Align2::RIGHT_BOTTOM, vec2(-14.0, -14.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+        egui::Frame::NONE.fill(t.chrome).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::symmetric(4, 2)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if small_icon(ui, Icon::FitSmall, "Fit slide to current window", false).clicked() {
+                    app.ui.zoom = None;
+                }
+                if small_icon(ui, Icon::ZoomOut, "Zoom Out", false).clicked() {
+                    let _ = app.run("view.zoomOut", json!({}));
+                }
+                let pct = (app.canvas_scale * 100.0).round();
+                ui.label(egui::RichText::new(format!("{pct}%")).size(12.0).color(t.text_dim));
+                if small_icon(ui, Icon::ZoomIn, "Zoom In", false).clicked() {
+                    let _ = app.run("view.zoomIn", json!({}));
+                }
+            });
+        });
+    });
+}
+
 fn small_icon(ui: &mut Ui, icon: Icon, tip: &str, on: bool) -> egui::Response {
     let t = Tokens::get(ui.ctx());
     let (r, resp) = ui.allocate_exact_size(vec2(26.0, 20.0), Sense::click());
@@ -155,13 +180,15 @@ pub fn notes_pane(app: &mut SlideApp, ui: &mut Ui) {
             }
             let mut draft = app.notes_buf.2.clone();
             let look = crate::notes::Look { size: 13.0, color: None };
+            // A read-only app shows the notes and takes no typing in them.
+            let editable = !app.read_only();
             // Long notes scroll inside the pane instead of spilling over the slide (#221).
             let out = egui::ScrollArea::vertical()
                 .max_height(ui.available_height())
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     crate::notes::editor(ui, &mut draft, &look, |e| {
-                        e.id(id).hint_text(tl!("Click to add notes")).frame(egui::Frame::NONE).desired_width(f32::INFINITY).desired_rows(2)
+                        e.id(id).hint_text(tl!("Click to add notes")).frame(egui::Frame::NONE).desired_width(f32::INFINITY).desired_rows(2).interactive(editable)
                     })
                 })
                 .inner;

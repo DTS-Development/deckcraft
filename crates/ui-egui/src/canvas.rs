@@ -255,7 +255,7 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     if app.ui.guides {
         draw_guides(app, &painter, xf, slide_rect, &t);
     }
-    if app.ui.ruler {
+    if app.ui.ruler && app.view.chrome && !app.read_only() {
         ruler(&painter, avail, slide_rect, scale, &t);
         ruler_markers(app, ui, &painter, avail, xf, &t);
     }
@@ -321,7 +321,8 @@ pub fn ime_area(app: &SlideApp, xf: Xf) -> Option<Rect> {
 /// separate jamo (ㅇ ㅏ ㄴ) instead of syllables. A focused text field sets its own.
 fn ime_output(app: &SlideApp, ui: &Ui, xf: Xf) {
     let ctx = ui.ctx();
-    if ctx.memory(|m| m.focused().is_some()) || app.dialog.as_ref().is_some_and(|d| d.modal()) || app.palette.is_some() || app.backstage_open() {
+    // A read-only slide takes no input method: the platform keeps its text input off.
+    if app.read_only() || ctx.memory(|m| m.focused().is_some()) || app.dialog.as_ref().is_some_and(|d| d.modal()) || app.palette.is_some() || app.backstage_open() {
         return;
     }
     let Some(r) = ime_area(app, xf) else { return };
@@ -724,7 +725,7 @@ fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf) {
     let Some(pos) = resp.interact_pointer_pos().or(resp.hover_pos()) else { return };
     // The rulers have their own controls; a press there mustn't reach the slide (and end text
     // editing). A drag already under way keeps going over them.
-    if app.ui.ruler && !app.session.tool.dragging() && (pos.y < resp.rect.min.y + 16.0 || pos.x < resp.rect.min.x + 16.0) {
+    if app.ui.ruler && app.view.chrome && !app.read_only() && !app.session.tool.dragging() && (pos.y < resp.rect.min.y + 16.0 || pos.x < resp.rect.min.x + 16.0) {
         return;
     }
     let p = xf.to_slide(pos);
@@ -751,7 +752,10 @@ fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf) {
     } else {
         Ok(serde_json::Value::Null)
     };
-    if let Err(e) = r {
+    // A read-only slide refuses a drag every frame, quietly (like the lock's refusals).
+    if let Err(e) = r
+        && !matches!(e, deckcraft_engine::EngineError::HostLocked(_))
+    {
         app.set_status(e.to_string());
     }
     // Cursor.
@@ -806,10 +810,16 @@ fn overlays(app: &mut SlideApp, ui: &Ui, painter: &egui::Painter, xf: Xf, t: &To
             crate::squiggles::paint(painter, xf.to_screen(a), xf.to_screen(b), scale);
         }
     }
+    let read_only = app.read_only();
     let Some(st) = app.session.active() else { return };
     let sel_stroke = Stroke::new(1.0, t.selection);
     let editing = st.selection.text.clone();
     for id in &st.selection.shapes {
+        // A read-only slide has no selection box or handles (nothing to move, size or rotate) and no
+        // caret; a selected text still shows highlighted, to copy from.
+        if read_only {
+            break;
+        }
         let Some(sh) = st.shape(*id) else { continue };
         let x = deckcraft_engine::cmd::xfrm_of(&st.doc, &st.selection, sh);
         let a = x.affine();
@@ -904,7 +914,7 @@ fn overlays(app: &mut SlideApp, ui: &Ui, painter: &egui::Painter, xf: Xf, t: &To
         for (a, b, thick) in deckcraft_engine::cmd::text::composition_underlines(st) {
             painter.line_segment([xf.to_screen(a), xf.to_screen(b)], Stroke::new(if thick { 2.0 } else { 1.0 }, t.caret));
         }
-        if !ts.is_range() {
+        if !ts.is_range() && !read_only {
             let blink = (ui.input(|i| i.time) * 1.6).fract() < 0.6;
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
             // An empty placeholder shows the caret where typing begins too.

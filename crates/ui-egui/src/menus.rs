@@ -54,7 +54,7 @@ pub fn ui_shortcut(app: &mut SlideApp, key: egui::Key, m: Mods) -> bool {
             return true;
         }
         (O, true, false, false) => "app.openDialog",
-        (V, true, false, true) if app.session.active().is_some() => {
+        (V, true, false, true) if app.session.active().is_some() && !app.read_only() => {
             app.dialog = Some(crate::dialogs::Dialog::new("pasteSpecial"));
             return true;
         }
@@ -66,7 +66,7 @@ pub fn ui_shortcut(app: &mut SlideApp, key: egui::Key, m: Mods) -> bool {
         (F1, true, false, false) => "view.collapseRibbon",
         (F9, false, true, false) => "view.gridlines",
         (F9, false, false, true) => "view.guides",
-        (K, true, false, false) => {
+        (K, true, false, false) if !app.read_only() => {
             app.dialog = Some(crate::dialogs::Dialog::new("hyperlink"));
             return true;
         }
