@@ -1,8 +1,8 @@
 //! The `postMessage` bridge to a same-origin parent page (`?host=parent`), for pages that embed
 //! DeckCraft in an `<iframe>`. Messages are plain objects with a `type`:
 //!
-//! - `deckcraft:ready` (to the parent): `{ version, options }`, the app is listening; send a file now.
-//!   `options` lists the open options this build understands (`readOnly`, `chrome`, `zoomControls`);
+//! - `deckcraft:ready` (to the parent): `{ version, openOptions }`, the app is listening; send a file now.
+//!   `openOptions` lists the open options this build understands (`readOnly`, `chrome`, `zoomControls`);
 //!   an older build has none and would open a presentation editable whatever it was asked for.
 //! - `deckcraft:open` (from the parent): `{ name, bytes, policy, readOnly, chrome, zoomControls }`, bytes an
 //!   `ArrayBuffer` or `Uint8Array`. It opens like a presentation picked with File › Open or dropped on
@@ -213,7 +213,7 @@ impl Bridge {
 
     pub fn post_ready(&self) {
         let options = crate::gate::SUPPORTED_OPTIONS.iter().map(|o| JsValue::from_str(o)).collect::<js_sys::Array>();
-        self.send(&[("type", "deckcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into()), ("options", options.into())]);
+        self.send(&[("type", "deckcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into()), ("openOptions", options.into())]);
     }
 
     pub fn post_failed(&self, error: &str) {
