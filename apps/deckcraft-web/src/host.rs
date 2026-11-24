@@ -1,9 +1,18 @@
 //! The `postMessage` bridge to a same-origin parent page (`?host=parent`), for pages that embed
 //! DeckCraft in an `<iframe>`. Messages are plain objects with a `type`:
 //!
-//! - `deckcraft:ready` (to the parent): `{ version }`, the app is listening; send a file now.
-//! - `deckcraft:open` (from the parent): `{ name, bytes, policy }`, bytes an `ArrayBuffer` or
-//!   `Uint8Array`. It opens like a presentation picked with File › Open or dropped on the window.
+//! - `deckcraft:ready` (to the parent): `{ version, options }`, the app is listening; send a file now.
+//!   `options` lists the open options this build understands (`readOnly`, `chrome`, `zoomControls`);
+//!   an older build has none and would open a presentation editable whatever it was asked for.
+//! - `deckcraft:open` (from the parent): `{ name, bytes, policy, readOnly, chrome, zoomControls }`, bytes an
+//!   `ArrayBuffer` or `Uint8Array`. It opens like a presentation picked with File › Open or dropped on
+//!   the window. The three options belong to that presentation and are booleans (anything else is as
+//!   if left out): `readOnly` lets nothing edit it and nothing save it (the parent hears no `dirty`, and
+//!   `request-bytes` with purpose `save` and `insert-table` are refused with `read-only`); `chrome: false`
+//!   hides the title bar, ribbon, status bar, task panes, notes pane and ruler, leaving the slide and
+//!   the thumbnails; `zoomControls` shows zoom buttons over the slide when `chrome` is off. An `open`
+//!   without them shows the presentation as before, so a later `open` never inherits an earlier one's
+//!   options; if the presentation fails to open the earlier options stay.
 //!   `policy` is `{ overrides: { "<command id>": true | false } }` with the commands that differ
 //!   from their grade (see `commands.json`); in the PPM build `true` turns an off command on and
 //!   `false` an on command off. A missing or malformed policy changes nothing; ids that are no
@@ -18,7 +27,7 @@
 //!   one undo step.
 //! - `deckcraft:table-inserted` (to the parent): `{ id }` when it did.
 //! - `deckcraft:table-failed` (to the parent): `{ id, error }` when it couldn't (bad rows, no
-//!   presentation open).
+//!   presentation open, `"read-only"`).
 //!
 //! - `deckcraft:goto` (from the parent): `{ id, location }`, location `{ kind: "pptx", slide, text,
 //!   occurrence, total? }`: slide and occurrence count from 1, slides in presentation order. It
@@ -37,7 +46,8 @@
 //!   named as Save would name it. Purpose `"save"` counts as saved, as Save does; `"check"` and
 //!   `"preview"` leave the app's state alone.
 //! - `deckcraft:bytes-failed` (to the parent): `{ id, purpose, reason }`; reason `"not-ready"` when
-//!   the parent's presentation has not arrived, is still opening or failed to open, `"bad-purpose"` for an unknown purpose.
+//!   the parent's presentation has not arrived, is still opening or failed to open, `"bad-purpose"` for an unknown purpose,
+//!   `"read-only"` for purpose `"save"` of a read-only presentation.
 //! - `deckcraft:add-fonts` (from the parent): `{ id, fonts: [{ family, bytes, format }] }`, format
 //!   `"ttf"` or `"otf"`. Each font goes into the font database (the font menu and the slides use
 //!   it). A font is known by the `family` the parent sent, not the name inside the file, and
@@ -62,7 +72,7 @@ use std::rc::Rc;
 
 use deckcraft_ui_egui::host_goto::{self, MAX_TEXT_CHARS};
 use deckcraft_ui_egui::host_table::{self, MAX_CELL_CHARS, MAX_COLS, MAX_ROWS};
-use deckcraft_ui_egui::{Inbox, InboxEvent, InboxFile, Services, SlideApp};
+use deckcraft_ui_egui::{Inbox, InboxEvent, InboxFile, Services, SlideApp, ViewOptions};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
@@ -128,7 +138,7 @@ pub struct Bridge {
     parent: web_sys::Window,
     origin: String,
     /// Files from the parent not yet handed to the app: `(name, bytes)`.
-    opened: Rc<RefCell<Vec<(String, Vec<u8>, Vec<(String, bool)>)>>>,
+    opened: Rc<RefCell<Vec<(String, Vec<u8>, Vec<(String, bool)>, ViewOptions)>>>,
     /// Tables from the parent not yet inserted.
     tables: Rc<RefCell<Vec<TableRequest>>>,
     /// Jumps from the parent not yet made.
@@ -202,7 +212,8 @@ impl Bridge {
     }
 
     pub fn post_ready(&self) {
-        self.send(&[("type", "deckcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into())]);
+        let options = crate::gate::SUPPORTED_OPTIONS.iter().map(|o| JsValue::from_str(o)).collect::<js_sys::Array>();
+        self.send(&[("type", "deckcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into()), ("options", options.into())]);
     }
 
     pub fn post_failed(&self, error: &str) {
@@ -211,9 +222,10 @@ impl Bridge {
 
     /// Before each pass: files from the parent open as if picked with File › Open.
     pub fn deliver(&self, app: &mut SlideApp, inbox: &Inbox) {
-        for (name, bytes, overrides) in std::mem::take(&mut *self.opened.borrow_mut()) {
+        for (name, bytes, overrides, view) in std::mem::take(&mut *self.opened.borrow_mut()) {
             app.session.set_policy(&overrides);
-            let id = app.begin_external_file("open");
+            // The options take hold when the presentation has opened.
+            let id = app.begin_host_open(view);
             inbox.lock().unwrap_or_else(|e| e.into_inner()).push(InboxEvent::File(InboxFile { id, name, bytes }));
         }
     }
@@ -222,7 +234,8 @@ impl Bridge {
     /// each went.
     pub fn deliver_tables(&self, app: &mut SlideApp) {
         for TableRequest { id, rows } in std::mem::take(&mut *self.tables.borrow_mut()) {
-            match rows.and_then(|rows| host_table::insert_table(app, &rows)) {
+            let refused = crate::gate::table_refusal(app.read_only()).map(|r| r.to_string());
+            match refused.map_or_else(|| rows.and_then(|rows| host_table::insert_table(app, &rows)), Err) {
                 Ok(()) => self.send(&[("type", "deckcraft:table-inserted".into()), ("id", id.as_str().into())]),
                 Err(error) => self.send(&[("type", "deckcraft:table-failed".into()), ("id", id.as_str().into()), ("error", error.as_str().into())]),
             };
@@ -292,6 +305,8 @@ impl Bridge {
                 Err("bad-purpose".to_string())
             } else if !app.opened_ok() || !self.opened.borrow().is_empty() || app.opening_file() {
                 Err("not-ready".to_string())
+            } else if let Some(reason) = crate::gate::bytes_refusal(&purpose, app.read_only()) {
+                Err(reason.to_string())
             } else if let Some(doc) = app.session.active() {
                 // The name and format Save gives a presentation with no file name.
                 let name = format!("{}.pptx", doc.title());
@@ -331,7 +346,7 @@ impl Bridge {
                 doc.title = std::path::Path::new(name).file_stem().map_or_else(|| name.clone(), |s| s.to_string_lossy().to_string());
             }
         }
-        let dirty = app.session.documents().iter().any(|d| d.is_dirty());
+        let dirty = crate::gate::reported_dirty(app.session.documents().iter().any(|d| d.is_dirty()), app.read_only());
         if self.reported.get() != Some(dirty) && self.send(&[("type", "deckcraft:dirty".into()), ("dirty", dirty.into())]) {
             self.reported.set(Some(dirty));
         }
@@ -410,7 +425,7 @@ impl Bridge {
                 Some("deckcraft:open") => {
                     let name = string(&data, "name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Presentation.pptx".to_string());
                     let Some(bytes) = bytes(&data) else { return };
-                    opened.borrow_mut().push((name, bytes, policy_overrides(&data)));
+                    opened.borrow_mut().push((name, bytes, policy_overrides(&data), view_options(&data)));
                 }
                 Some("deckcraft:insert-table") => {
                     // Without a usable id there is nobody to answer.
@@ -516,6 +531,18 @@ fn policy_overrides(data: &JsValue) -> Vec<(String, bool)> {
             Some((pair.get(0).as_string()?, pair.get(1).as_bool()?))
         })
         .collect()
+}
+
+/// `readOnly`, `chrome` and `zoomControls` of an open message; a key that is missing or no boolean is
+/// as if left out, which is the editor as it was.
+fn view_options(data: &JsValue) -> ViewOptions {
+    let flag = |key: &str| js_sys::Reflect::get(data, &JsValue::from_str(key)).ok().and_then(|v| v.as_bool());
+    let default = ViewOptions::default();
+    ViewOptions {
+        read_only: flag("readOnly").unwrap_or(default.read_only),
+        chrome: flag("chrome").unwrap_or(default.chrome),
+        zoom_controls: flag("zoomControls").unwrap_or(default.zoom_controls),
+    }
 }
 
 fn string(data: &JsValue, key: &str) -> Option<String> {

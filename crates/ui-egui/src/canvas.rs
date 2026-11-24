@@ -255,7 +255,7 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     if app.ui.guides {
         draw_guides(app, &painter, xf, slide_rect, &t);
     }
-    if app.ui.ruler {
+    if app.ui.ruler && app.view.chrome && !app.read_only() {
         ruler(&painter, avail, slide_rect, scale, &t);
         ruler_markers(app, ui, &painter, avail, xf, &t);
     }
@@ -321,7 +321,8 @@ pub fn ime_area(app: &SlideApp, xf: Xf) -> Option<Rect> {
 /// separate jamo (ㅇ ㅏ ㄴ) instead of syllables. A focused text field sets its own.
 fn ime_output(app: &SlideApp, ui: &Ui, xf: Xf) {
     let ctx = ui.ctx();
-    if ctx.memory(|m| m.focused().is_some()) || app.dialog.as_ref().is_some_and(|d| d.modal()) || app.palette.is_some() || app.backstage_open() {
+    // A read-only slide takes no input method: the platform keeps its text input off.
+    if app.read_only() || ctx.memory(|m| m.focused().is_some()) || app.dialog.as_ref().is_some_and(|d| d.modal()) || app.palette.is_some() || app.backstage_open() {
         return;
     }
     let Some(r) = ime_area(app, xf) else { return };
@@ -724,7 +725,7 @@ fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf) {
     let Some(pos) = resp.interact_pointer_pos().or(resp.hover_pos()) else { return };
     // The rulers have their own controls; a press there mustn't reach the slide (and end text
     // editing). A drag already under way keeps going over them.
-    if app.ui.ruler && !app.session.tool.dragging() && (pos.y < resp.rect.min.y + 16.0 || pos.x < resp.rect.min.x + 16.0) {
+    if app.ui.ruler && app.view.chrome && !app.read_only() && !app.session.tool.dragging() && (pos.y < resp.rect.min.y + 16.0 || pos.x < resp.rect.min.x + 16.0) {
         return;
     }
     let p = xf.to_slide(pos);
