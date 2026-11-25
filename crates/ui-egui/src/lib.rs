@@ -1952,7 +1952,7 @@ impl SlideApp {
                     if mods.cmd
                         && matches!(key, egui::Key::N)
                         && let Err(e) = self.session.key(key_name(key), mods)
-                        && !matches!(&e, deckcraft_engine::EngineError::HostLocked(_))
+                        && !e.is_quiet_refusal()
                     {
                         self.set_status(e.to_string());
                     }
@@ -2024,8 +2024,8 @@ impl SlideApp {
                     let name = key_name(key);
                     match self.session.key(name, mods) {
                         Ok(_) => {}
-                        // A key for a command the host lock refuses does nothing, quietly.
-                        Err(deckcraft_engine::EngineError::HostLocked(_)) => {}
+                        // A key for a command the host lock (or a slide someone else holds) refuses does nothing, quietly.
+                        Err(e) if e.is_quiet_refusal() => {}
                         Err(e) => self.set_status(e.to_string()),
                     }
                 }

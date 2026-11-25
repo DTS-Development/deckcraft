@@ -275,6 +275,21 @@ impl Session {
         out
     }
 
+    /// The error for a refused edit; the region is remembered so the parent can be asked for its lock.
+    pub(crate) fn collab_refused(&mut self, v: &Violation) -> EngineError {
+        let key = v.key();
+        if !self.collab_wants.contains(&key) {
+            self.collab_wants.push(key.clone());
+        }
+        EngineError::CollabLocked(key)
+    }
+
+    /// The region keys edits were refused for since the last call (each once), for the parent to
+    /// request as locks (`collab-want`).
+    pub fn collab_take_wants(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.collab_wants)
+    }
+
     /// How many remote changes are waiting for a composition to end.
     pub fn collab_held_len(&self) -> usize {
         self.active().and_then(|d| self.collab_held.get(&d.uid)).map_or(0, Vec::len)
@@ -460,6 +475,9 @@ mod tests {
         let before = fp(&s);
         let r = s.execute("insert.textBox", &json!({}));
         assert!(matches!(&r, Err(EngineError::CollabLocked(k)) if *k == format!("slide:{}", ids[0].0)), "{r:?}");
+        assert!(r.as_ref().is_err_and(EngineError::is_quiet_refusal));
+        assert_eq!(s.collab_take_wants(), vec![format!("slide:{}", ids[0].0)], "the refusal asks the parent for the lock");
+        assert!(s.collab_take_wants().is_empty());
         assert_eq!(fp(&s), before, "the refused edit left the document, the baseline and the undo stack as they were");
     }
 

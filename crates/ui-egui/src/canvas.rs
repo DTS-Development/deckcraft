@@ -754,7 +754,7 @@ fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf) {
     };
     // A read-only slide refuses a drag every frame, quietly (like the lock's refusals).
     if let Err(e) = r
-        && !matches!(e, deckcraft_engine::EngineError::HostLocked(_))
+        && !e.is_quiet_refusal()
     {
         app.set_status(e.to_string());
     }

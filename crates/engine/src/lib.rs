@@ -68,6 +68,14 @@ pub enum EngineError {
     Internal(String, String),
 }
 
+impl EngineError {
+    /// A refusal the page already knows about and the user is not told of in the status line: the
+    /// host lock's, and a slide someone else holds (the parent is asked for the lock instead).
+    pub fn is_quiet_refusal(&self) -> bool {
+        matches!(self, EngineError::HostLocked(_) | EngineError::CollabLocked(_))
+    }
+}
+
 impl From<deckcraft_model::ModelError> for EngineError {
     fn from(e: deckcraft_model::ModelError) -> Self {
         EngineError::Other(e.to_string())
@@ -501,6 +509,8 @@ pub struct Session {
     collab: std::collections::HashMap<u64, collab::Gate>,
     /// Remote changes waiting for an input method's composition to end, by presentation uid.
     collab_held: std::collections::HashMap<u64, Vec<collab::Remote>>,
+    /// Region keys an edit was refused for, until the parent has been asked for them.
+    collab_wants: Vec<String>,
     /// What the server is known to have of each shared presentation (ours already sent, theirs already applied).
     collab_base: std::collections::HashMap<u64, Arc<Presentation>>,
     /// Remote changes that could not be applied once they were let through (see [`Session::collab_take_failed`]).
@@ -541,6 +551,7 @@ impl Session {
             trusted: false,
             collab: Default::default(),
             collab_held: Default::default(),
+            collab_wants: vec![],
             collab_base: Default::default(),
             collab_failed: vec![],
         }
@@ -727,7 +738,7 @@ impl Session {
                 st.selection = sel.clone();
                 st.revision += 1;
             }
-            return Err(EngineError::CollabLocked(v.key()));
+            return Err(self.collab_refused(&v));
         }
         if let Some(st) = self.active_mut() {
             clamp_selection(st);
@@ -769,7 +780,7 @@ impl Session {
         if self.depth == 0
             && let Some(v) = self.collab_check(st_uid, &old_doc, &doc)
         {
-            return Err(EngineError::CollabLocked(v.key()));
+            return Err(self.collab_refused(&v));
         }
         let st = self.doc_mut()?;
         st.doc = Arc::new(doc);
