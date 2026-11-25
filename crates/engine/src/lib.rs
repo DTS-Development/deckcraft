@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cmd;
+pub mod collab;
 pub mod compare;
 pub mod connect;
 pub mod drawtable;
@@ -58,6 +59,9 @@ pub enum EngineError {
     // The text is `hostlock::BLOCKED_TEXT` (thiserror can't take a path in the format string).
     #[error("command `{0}` is blocked by the PPM host lock")]
     HostLocked(String),
+    /// An edit outside the slides, structure or design the parent granted (see [`collab`]); the text is the region key.
+    #[error("`{0}` is being edited by someone else")]
+    CollabLocked(String),
     #[error("{0}")]
     Other(String),
     #[error("internal error in `{0}` (the presentation was kept as it was): {1}")]
@@ -493,6 +497,8 @@ pub struct Session {
     /// The next outermost command skips the host lock (the parent's own file, see
     /// [`Session::open_host_file`]).
     trusted: bool,
+    /// Presentations (by uid) shared with others and what the user may edit in each, see [`collab`].
+    collab: std::collections::HashMap<u64, collab::Gate>,
 }
 
 impl Default for Session {
@@ -527,6 +533,7 @@ impl Session {
             host: hostlock::HOST_BUILD.then(hostlock::Policy::default),
             read_only: Default::default(),
             trusted: false,
+            collab: Default::default(),
         }
     }
     /// Locks the session to its PPM host: only classified commands run, see [`hostlock`]. There
@@ -692,6 +699,22 @@ impl Session {
                 return Err(e);
             }
         };
+        // Shared editing: the outermost command may only have changed what the parent granted.
+        if outer
+            && !self.collab.is_empty()
+            && let Some((uid, old, sel)) = before.as_ref()
+            && let Some(st) = self.active()
+            && st.uid == *uid
+            && !Arc::ptr_eq(old, &st.doc)
+            && let Some(v) = self.collab_check(*uid, old, &st.doc)
+        {
+            if let Some(st) = self.active_mut() {
+                st.doc = old.clone();
+                st.selection = sel.clone();
+                st.revision += 1;
+            }
+            return Err(EngineError::CollabLocked(v.key()));
+        }
         if let Some(st) = self.active_mut() {
             clamp_selection(st);
         }
@@ -724,10 +747,17 @@ impl Session {
             return Err(EngineError::HostLocked("edit".into()));
         }
         let st = self.doc_mut()?;
+        let (st_uid, old_doc) = (st.uid, st.doc.clone());
         let mut doc = (*st.doc).clone();
         let mut sel = st.selection.clone();
         let r = f(&mut doc, &mut sel)?;
         connect::reroute(&mut doc, &sel);
+        if self.depth == 0
+            && let Some(v) = self.collab_check(st_uid, &old_doc, &doc)
+        {
+            return Err(EngineError::CollabLocked(v.key()));
+        }
+        let st = self.doc_mut()?;
         st.doc = Arc::new(doc);
         st.selection = sel;
         st.revision += 1;
