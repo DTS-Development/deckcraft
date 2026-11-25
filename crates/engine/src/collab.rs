@@ -106,6 +106,14 @@ fn patched(p: &Arc<Presentation>, slide: &Arc<Slide>, media_from: &Presentation)
     Arc::new(d)
 }
 
+/// Whether a picture `slide` uses is a stand-in in `doc` but real in `from`.
+fn stand_in_filled(doc: &Presentation, from: &Presentation, slide: &Slide) -> bool {
+    use crate::collab_codec::is_stand_in;
+    let mut ids = vec![];
+    crate::cmd::edit::media_of_shapes(&slide.shapes, &mut ids);
+    ids.iter().any(|id| matches!((doc.media(*id), from.media(*id)), (Some(here), Some(there)) if is_stand_in(here) && !is_stand_in(there)))
+}
+
 /// A remote change that is waiting for an input method's composition to end.
 #[derive(Clone, Debug)]
 pub enum Remote {
@@ -441,8 +449,9 @@ impl Session {
         let Some(here) = doc.slides.iter().find(|s| s.id == id) else {
             return Err(EngineError::Other(format!("slide {} is not in this presentation", id.0)));
         };
-        // Already the same: nothing to write (a reset sends every slide).
-        if Arc::ptr_eq(here, &src) || **here == *src {
+        // Already the same: nothing to write (a reset sends every slide). A picture that was only a
+        // stand-in here and has its bytes now is a difference even though the slide reads the same.
+        if (Arc::ptr_eq(here, &src) || **here == *src) && !stand_in_filled(&doc, from, &src) {
             return Ok(());
         }
         let adopted = Arc::new(crate::compare::adopt(&mut doc, from, &src, Some(id))?);

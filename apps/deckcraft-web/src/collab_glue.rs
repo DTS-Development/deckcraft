@@ -7,15 +7,19 @@
 
 use deckcraft_engine::Session;
 use deckcraft_engine::collab::Outgoing;
-use deckcraft_engine::collab_codec::{CodecError, decode_order, decode_slide, encode_order, encode_slide};
+use deckcraft_engine::cmd::{base64_decode, base64_encode};
+use deckcraft_engine::collab_codec::{BlobStore, CodecError, MAX_BIG, content_hash, decode_order, decode_slide, encode_order, encode_slide, is_hash};
 use deckcraft_engine::model::{Presentation, SlideId};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::collab_wire::{KEY_STRUCTURE, KIND_ORDER, KIND_SLIDE, Link, parse_slide_key, regions, slide_key};
 
 /// Slides that came before the list that names them (a new slide is sent first, then the list).
 const MAX_STASH: usize = 64;
+/// Pictures asked for at once; the rest wait for these to arrive.
+const MAX_ASKED: usize = 32;
 
 /// What one call has to show the user and send to the parent.
 #[derive(Debug, Default, PartialEq)]
@@ -33,6 +37,15 @@ pub struct Shared {
     stash: Vec<(SlideId, Presentation)>,
     /// Slides whose lock was given back and the parent has not confirmed yet.
     released: HashSet<SlideId>,
+    /// Bytes of pictures seen, by hash.
+    blobs: BlobStore,
+    /// Big pictures already sent to the parent for the server.
+    uploaded: HashSet<String>,
+    /// Slides of others drawn with a stand-in picture: the data as sent, and the hashes still missing.
+    waiting: HashMap<SlideId, (Value, Vec<String>)>,
+    /// Hashes asked of the parent, and the ones the server could not give.
+    asked: HashSet<String>,
+    gone: HashSet<String>,
 }
 
 impl Shared {
@@ -46,6 +59,79 @@ impl Shared {
         if self.stash.len() > MAX_STASH {
             self.stash.remove(0);
         }
+    }
+
+    /// Slide `id`'s data from someone else as a presentation. A picture whose bytes are not here
+    /// yet is drawn as a stand-in and remembered so it is replaced when the bytes arrive.
+    fn decode(&mut self, id: SlideId, data: &Value) -> Result<Presentation, CodecError> {
+        let d = decode_slide(data, &mut self.blobs)?;
+        if d.missing.is_empty() {
+            self.waiting.remove(&id);
+        } else {
+            self.waiting.insert(id, (data.clone(), d.missing));
+        }
+        Ok(d.presentation)
+    }
+
+    /// Asks the parent for pictures the slides above are waiting on (a few at a time).
+    fn ask(&mut self, out: &mut Out) {
+        let mut want: Vec<String> = vec![];
+        for (_, missing) in self.waiting.values() {
+            for h in missing {
+                if !self.asked.contains(h) && !self.gone.contains(h) && !want.contains(h) {
+                    want.push(h.clone());
+                }
+            }
+        }
+        for h in want.into_iter().take(MAX_ASKED.saturating_sub(self.asked.len())) {
+            out.send.push(serde_json::json!({"type": "deckcraft:collab-need-blob", "hash": h}));
+            self.asked.insert(h);
+        }
+    }
+
+    /// The bytes of a picture asked for: kept, and the slides waiting on it are drawn again.
+    fn on_blob(&mut self, s: &mut Session, m: &Value, out: &mut Out) {
+        let Some(hash) = m.get("hash").and_then(Value::as_str).filter(|h| is_hash(h)) else { return };
+        // Only what was asked for.
+        if !self.asked.remove(hash) {
+            return;
+        }
+        let b64 = m.get("b64").and_then(Value::as_str).unwrap_or("");
+        let data = (b64.len() <= MAX_BIG.div_ceil(3) * 4 + 8).then(|| base64_decode(b64)).flatten();
+        match data {
+            Some(d) if content_hash(&d) == hash => self.blobs.put(hash.to_string(), Arc::new(d)),
+            _ => {
+                self.gone.insert(hash.to_string());
+                out.notes.push("A picture from the server was damaged and wasn't used.".to_string());
+                self.ask(out);
+                return;
+            }
+        }
+        let ids: Vec<SlideId> = self.waiting.iter().filter(|(_, (_, missing))| missing.iter().any(|h| h == hash)).map(|(id, _)| *id).collect();
+        for id in ids {
+            let Some((data, _)) = self.waiting.get(&id).cloned() else { continue };
+            let res = self.decode(id, &data).map_err(|e| format!("{e:?}")).and_then(|p| {
+                if Self::local(s, id) {
+                    s.collab_apply_slide(id, &p).map_err(|e| e.to_string())
+                } else {
+                    self.stash(id, p);
+                    Ok(())
+                }
+            });
+            if let Err(e) = res {
+                out.notes.push(format!("Couldn't show a picture that arrived: {e}"));
+            }
+        }
+        self.ask(out);
+    }
+
+    /// The server has no such picture: the stand-in stays.
+    fn on_blob_missing(&mut self, m: &Value, out: &mut Out) {
+        let Some(hash) = m.get("hash").and_then(Value::as_str).filter(|h| is_hash(h)) else { return };
+        if self.asked.remove(hash) && self.gone.insert(hash.to_string()) {
+            out.notes.push("A picture in this presentation isn't available from the server.".to_string());
+        }
+        self.ask(out);
     }
 
     fn local(s: &Session, id: SlideId) -> bool {
@@ -74,6 +160,8 @@ impl Shared {
             Some("collab-reject") => self.on_reject(s, m, &mut out),
             Some("collab-reset") => self.on_reset(s, m, &mut out),
             Some("collab-apply") => self.on_apply(s, m, &mut out),
+            Some("collab-blob") => self.on_blob(s, m, &mut out),
+            Some("collab-blob-missing") => self.on_blob_missing(m, &mut out),
             _ => {}
         }
         out
@@ -82,9 +170,16 @@ impl Shared {
     fn on_reset(&mut self, s: &mut Session, m: &Value, out: &mut Out) {
         let mut order = None;
         let mut slides = vec![];
+        // The server's whole state replaces what was being waited on; pictures sent earlier may be gone from it.
+        self.waiting.clear();
+        self.uploaded.clear();
         for (key, kind, ver, data) in regions(m, "regions") {
             self.link.note_ver(&key, ver);
-            match (kind.as_str(), decode_slide(&data), parse_slide_key(&key)) {
+            let decoded = match parse_slide_key(&key) {
+                Some(id) if kind == KIND_SLIDE => self.decode(id, &data),
+                _ => decode_slide(&data, &mut self.blobs).map(|d| d.presentation),
+            };
+            match (kind.as_str(), decoded, parse_slide_key(&key)) {
                 (KIND_SLIDE, Ok(p), Some(_)) => slides.push(p),
                 (KIND_ORDER, _, _) if key == KEY_STRUCTURE => match decode_order(&data) {
                     Ok(o) => order = Some(o),
@@ -100,13 +195,14 @@ impl Shared {
         if let Err(e) = s.collab_reset(&order, &from) {
             out.notes.push(format!("Couldn't bring the presentation up to date: {e}"));
         }
+        self.ask(out);
     }
 
     fn on_apply(&mut self, s: &mut Session, m: &Value, out: &mut Out) {
         for (key, kind, ver, data) in regions(m, "changes") {
             self.link.note_ver(&key, ver);
             let res = match (kind.as_str(), parse_slide_key(&key)) {
-                (KIND_SLIDE, Some(id)) => decode_slide(&data).map_err(|e| format!("{e:?}")).and_then(|p| {
+                (KIND_SLIDE, Some(id)) => self.decode(id, &data).map_err(|e| format!("{e:?}")).and_then(|p| {
                     if Self::local(s, id) {
                         s.collab_apply_slide(id, &p).map_err(|e| e.to_string())
                     } else {
@@ -124,6 +220,7 @@ impl Shared {
                 out.notes.push(format!("Couldn't apply a change from {key}: {e}"));
             }
         }
+        self.ask(out);
     }
 
     fn on_reject(&mut self, s: &mut Session, m: &Value, out: &mut Out) {
@@ -138,7 +235,7 @@ impl Shared {
             _ => format!("A change couldn't be shared{back}."),
         });
         if let Some(id) = parse_slide_key(&r.region) {
-            if let Some(Ok(p)) = server.map(decode_slide)
+            if let Some(Ok(p)) = server.map(|d| self.decode(id, d))
                 && let Err(e) = s.collab_apply_slide(id, &p)
             {
                 out.notes.push(format!("Couldn't take the change back: {e}"));
@@ -165,20 +262,30 @@ impl Shared {
                 out.send.push(m);
             }
         }
-        let link = &mut self.link;
+        let Shared { link, blobs, uploaded, waiting, .. } = self;
         let (send, notes) = (&mut out.send, &mut out.notes);
         let refused = s.collab_send_outgoing(&mut |doc, item| {
             let (key, kind, data) = match item {
-                Outgoing::Slide(id) => (slide_key(*id), KIND_SLIDE, encode_slide(doc, *id)),
-                Outgoing::Structure(order) => (KEY_STRUCTURE.to_string(), KIND_ORDER, Ok(encode_order(order))),
+                Outgoing::Slide(id) => (slide_key(*id), KIND_SLIDE, encode_slide(doc, *id, blobs).map(|e| (e.data, e.big))),
+                Outgoing::Structure(order) => (KEY_STRUCTURE.to_string(), KIND_ORDER, Ok((encode_order(order), vec![]))),
             };
             match data {
-                Ok(data) => {
+                Ok((data, big)) => {
+                    // A picture's bytes reach the server before the slide that names it.
+                    for (hash, bytes) in big {
+                        if uploaded.insert(hash.clone()) {
+                            send.push(serde_json::json!({"type": "deckcraft:collab-blob-out", "hash": hash, "b64": base64_encode(&bytes)}));
+                        }
+                    }
+                    // This editor's own edit now stands for the slide; an arriving picture must not undo it.
+                    if let Outgoing::Slide(id) = item {
+                        waiting.remove(id);
+                    }
                     send.push(link.changed(&key, kind, data));
                     true
                 }
                 Err(CodecError::TooLarge) => {
-                    notes.push("That slide is too large to share (a picture over 256 KB) and was taken back.".to_string());
+                    notes.push("That slide is too large to share (a picture over 16 MB) and was taken back.".to_string());
                     false
                 }
                 Err(e) => {
@@ -272,7 +379,7 @@ mod tests {
         let mut order = ids(&b);
         order.push(new_id);
         let apply = json!({"type": "deckcraft:collab-apply", "changes": [
-            {"key": slide_key(new_id), "ver": 1, "kind": KIND_SLIDE, "data": encode_slide(&src, new_id).unwrap(), "author": {}},
+            {"key": slide_key(new_id), "ver": 1, "kind": KIND_SLIDE, "data": encode_slide(&src, new_id, &mut BlobStore::default()).unwrap().data, "author": {}},
             {"key": KEY_STRUCTURE, "ver": 1, "kind": KIND_ORDER, "data": encode_order(&order), "author": {}},
         ]});
         let dirty = b.active().unwrap().is_dirty();
@@ -296,7 +403,7 @@ mod tests {
         s.execute("insert.textBox", &json!({})).unwrap();
         let sent = sh.pump(&mut s);
         let m = sent.send.iter().find(|m| m["type"] == "deckcraft:collab-changed").unwrap().clone();
-        let out = sh.on_message(&mut s, &json!({"type": "deckcraft:collab-reject", "seq": m["seq"], "region": slide_key(id), "reason": "stale", "current": {"key": slide_key(id), "ver": 2, "kind": KIND_SLIDE, "data": encode_slide(&before, id).unwrap(), "author": {}}}));
+        let out = sh.on_message(&mut s, &json!({"type": "deckcraft:collab-reject", "seq": m["seq"], "region": slide_key(id), "reason": "stale", "current": {"key": slide_key(id), "ver": 2, "kind": KIND_SLIDE, "data": encode_slide(&before, id, &mut BlobStore::default()).unwrap().data, "author": {}}}));
         assert_eq!(out.notes.len(), 1, "{out:?}");
         assert_eq!(*s.active().unwrap().doc.slides[0], *before.slides[0]);
     }
@@ -308,5 +415,134 @@ mod tests {
             let _ = sh.on_message(&mut s, &m);
         }
         assert_eq!(ids(&s).len(), 3);
+    }
+
+    /// Gives slide `i` a picture of `bytes`.
+    fn add_picture(s: &mut Session, i: usize, bytes: &[u8]) {
+        use deckcraft_engine::model::style::PictureFill;
+        use deckcraft_engine::model::{Shape, ShapeKind};
+        let doc = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+        let media = doc.add_media("big.jpg", "image/jpeg", bytes.to_vec()).unwrap();
+        let sid = deckcraft_engine::model::ShapeId(doc.alloc_id().unwrap());
+        std::sync::Arc::make_mut(&mut doc.slides[i]).shapes.push(Shape { id: sid, kind: ShapeKind::Picture { fill: PictureFill { media, ..Default::default() } }, ..Default::default() });
+    }
+
+    fn media_bytes(s: &Session, i: usize) -> Vec<u8> {
+        let d = &s.active().unwrap().doc;
+        let mut found = None;
+        deckcraft_engine::model::walk(&d.slides[i].shapes, &mut |sh, _| {
+            if let deckcraft_engine::model::ShapeKind::Picture { fill } = &sh.kind {
+                found = Some(fill.media);
+            }
+        });
+        d.media(found.expect("a picture")).unwrap().data.as_ref().clone()
+    }
+
+    fn of_type<'a>(out: &'a Out, t: &str) -> Vec<&'a Value> {
+        out.send.iter().filter(|m| m["type"] == t).collect()
+    }
+
+    /// `a` edits slide 0 with a big picture; returns what it sent.
+    fn send_big(bytes: &[u8]) -> (Session, Shared, SlideId, Out) {
+        let (mut a, mut sa) = (deck(), Shared::new());
+        let id = ids(&a)[0];
+        go(&mut a, 0);
+        sa.on_message(&mut a, &lock(&[id]));
+        add_picture(&mut a, 0, bytes);
+        a.execute("text.exit", &json!({})).ok();
+        let out = sa.pump(&mut a);
+        (a, sa, id, out)
+    }
+
+    #[test]
+    fn a_big_picture_is_uploaded_before_its_slide_and_nothing_is_too_large_under_16_mb() {
+        let bytes = vec![3u8; 300 * 1024];
+        let (_a, _sa, id, out) = send_big(&bytes);
+        let kinds: Vec<&str> = out.send.iter().map(|m| m["type"].as_str().unwrap()).collect();
+        let up = kinds.iter().position(|k| *k == "deckcraft:collab-blob-out").expect("uploaded");
+        let ch = kinds.iter().position(|k| *k == "deckcraft:collab-changed").expect("slide sent");
+        assert!(up < ch, "{kinds:?}");
+        assert!(out.notes.is_empty(), "{out:?}");
+        let m = of_type(&out, "deckcraft:collab-blob-out")[0];
+        assert_eq!(m["hash"], deckcraft_engine::collab_codec::content_hash(&bytes));
+        assert_eq!(base64_decode(m["b64"].as_str().unwrap()).unwrap(), bytes);
+        let changed = of_type(&out, "deckcraft:collab-changed")[0];
+        assert_eq!(changed["region"], slide_key(id));
+        assert!(changed["data"].to_string().len() < 100_000, "the region carries only the name");
+    }
+
+    #[test]
+    fn a_receiver_draws_a_stand_in_asks_for_the_picture_and_swaps_it_in_when_it_arrives() {
+        let bytes = vec![4u8; 300 * 1024];
+        let (_a, _sa, id, sent) = send_big(&bytes);
+        let changed = of_type(&sent, "deckcraft:collab-changed")[0];
+        let (mut b, mut sb) = (deck(), Shared::new());
+        let apply = json!({"type": "deckcraft:collab-apply", "changes": [{"key": slide_key(id), "ver": 1, "kind": KIND_SLIDE, "data": changed["data"], "author": {}}]});
+        let out = sb.on_message(&mut b, &apply);
+        assert!(out.notes.is_empty(), "{out:?}");
+        let need = of_type(&out, "deckcraft:collab-need-blob");
+        assert_eq!(need.len(), 1);
+        let hash = need[0]["hash"].as_str().unwrap().to_string();
+        assert!(media_bytes(&b, 0).len() < 512, "a stand-in is drawn meanwhile");
+        // Asking again changes nothing: the same hash is asked once.
+        assert!(of_type(&sb.on_message(&mut b, &apply), "deckcraft:collab-need-blob").is_empty());
+        let blob = json!({"type": "deckcraft:collab-blob", "hash": hash, "b64": base64_encode(&bytes)});
+        let out = sb.on_message(&mut b, &blob);
+        assert!(out.notes.is_empty(), "{out:?}");
+        assert_eq!(media_bytes(&b, 0), bytes);
+    }
+
+    #[test]
+    fn a_picture_nobody_asked_for_or_with_the_wrong_bytes_is_not_used() {
+        let bytes = vec![5u8; 300 * 1024];
+        let (_a, _sa, id, sent) = send_big(&bytes);
+        let changed = of_type(&sent, "deckcraft:collab-changed")[0];
+        let hash = deckcraft_engine::collab_codec::content_hash(&bytes);
+        let (mut b, mut sb) = (deck(), Shared::new());
+        // Before it was asked for: ignored.
+        let out = sb.on_message(&mut b, &json!({"type": "deckcraft:collab-blob", "hash": hash, "b64": base64_encode(&bytes)}));
+        assert!(out.send.is_empty() && out.notes.is_empty());
+        sb.on_message(&mut b, &json!({"type": "deckcraft:collab-apply", "changes": [{"key": slide_key(id), "ver": 1, "kind": KIND_SLIDE, "data": changed["data"], "author": {}}]}));
+        let out = sb.on_message(&mut b, &json!({"type": "deckcraft:collab-blob", "hash": hash, "b64": base64_encode(&[1, 2, 3])}));
+        assert_eq!(out.notes.len(), 1, "{out:?}");
+        assert!(media_bytes(&b, 0).len() < 512);
+        // A damaged answer is not asked for again; the stand-in stays.
+        let out = sb.on_message(&mut b, &json!({"type": "deckcraft:collab-blob-missing", "hash": hash}));
+        assert!(out.send.is_empty());
+    }
+
+    #[test]
+    fn a_missing_picture_leaves_the_stand_in_and_says_so_once() {
+        let (_a, _sa, id, sent) = send_big(&vec![6u8; 300 * 1024]);
+        let changed = of_type(&sent, "deckcraft:collab-changed")[0];
+        let (mut b, mut sb) = (deck(), Shared::new());
+        let out = sb.on_message(&mut b, &json!({"type": "deckcraft:collab-apply", "changes": [{"key": slide_key(id), "ver": 1, "kind": KIND_SLIDE, "data": changed["data"], "author": {}}]}));
+        let hash = of_type(&out, "deckcraft:collab-need-blob")[0]["hash"].clone();
+        let out = sb.on_message(&mut b, &json!({"type": "deckcraft:collab-blob-missing", "hash": hash}));
+        assert_eq!(out.notes.len(), 1);
+        assert!(media_bytes(&b, 0).len() < 512);
+        assert!(of_type(&out, "deckcraft:collab-need-blob").is_empty());
+    }
+
+    #[test]
+    fn editing_a_slide_that_still_has_a_stand_in_names_the_real_picture_and_is_not_overwritten_later() {
+        let bytes = vec![8u8; 300 * 1024];
+        let (_a, _sa, id, sent) = send_big(&bytes);
+        let changed = of_type(&sent, "deckcraft:collab-changed")[0];
+        let (mut b, mut sb) = (deck(), Shared::new());
+        let out = sb.on_message(&mut b, &json!({"type": "deckcraft:collab-apply", "changes": [{"key": slide_key(id), "ver": 1, "kind": KIND_SLIDE, "data": changed["data"], "author": {}}]}));
+        let hash = of_type(&out, "deckcraft:collab-need-blob")[0]["hash"].clone();
+        sb.on_message(&mut b, &lock(&[id]));
+        go(&mut b, 0);
+        b.execute("insert.textBox", &json!({})).unwrap();
+        let mine = sb.pump(&mut b);
+        assert!(of_type(&mine, "deckcraft:collab-blob-out").is_empty(), "the stand-in's bytes are never uploaded");
+        let m = of_type(&mine, "deckcraft:collab-changed")[0];
+        assert_eq!(m["data"]["media"][0]["hash"], hash);
+        assert!(m["data"]["media"][0].get("b64").is_none());
+        let shapes = b.active().unwrap().doc.slides[0].shapes.len();
+        // The picture arriving later must not put the slide back to what it was.
+        sb.on_message(&mut b, &json!({"type": "deckcraft:collab-blob", "hash": hash, "b64": base64_encode(&bytes)}));
+        assert_eq!(b.active().unwrap().doc.slides[0].shapes.len(), shapes);
     }
 }
