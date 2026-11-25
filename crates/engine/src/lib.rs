@@ -8,6 +8,8 @@
 #![forbid(unsafe_code)]
 
 pub mod cmd;
+pub mod collab;
+pub mod collab_codec;
 pub mod compare;
 pub mod connect;
 pub mod drawtable;
@@ -58,10 +60,21 @@ pub enum EngineError {
     // The text is `hostlock::BLOCKED_TEXT` (thiserror can't take a path in the format string).
     #[error("command `{0}` is blocked by the PPM host lock")]
     HostLocked(String),
+    /// An edit outside the slides, structure or design the parent granted (see [`collab`]); the text is the region key.
+    #[error("`{0}` is being edited by someone else")]
+    CollabLocked(String),
     #[error("{0}")]
     Other(String),
     #[error("internal error in `{0}` (the presentation was kept as it was): {1}")]
     Internal(String, String),
+}
+
+impl EngineError {
+    /// A refusal the page already knows about and the user is not told of in the status line: the
+    /// host lock's, and a slide someone else holds (the parent is asked for the lock instead).
+    pub fn is_quiet_refusal(&self) -> bool {
+        matches!(self, EngineError::HostLocked(_) | EngineError::CollabLocked(_))
+    }
 }
 
 impl From<deckcraft_model::ModelError> for EngineError {
@@ -493,6 +506,16 @@ pub struct Session {
     /// The next outermost command skips the host lock (the parent's own file, see
     /// [`Session::open_host_file`]).
     trusted: bool,
+    /// Presentations (by uid) shared with others and what the user may edit in each, see [`collab`].
+    collab: std::collections::HashMap<u64, collab::Gate>,
+    /// Remote changes waiting for an input method's composition to end, by presentation uid.
+    collab_held: std::collections::HashMap<u64, Vec<collab::Remote>>,
+    /// Region keys an edit was refused for, until the parent has been asked for them.
+    collab_wants: Vec<String>,
+    /// What the server is known to have of each shared presentation (ours already sent, theirs already applied).
+    collab_base: std::collections::HashMap<u64, Arc<Presentation>>,
+    /// Remote changes that could not be applied once they were let through (see [`Session::collab_take_failed`]).
+    collab_failed: Vec<String>,
 }
 
 impl Default for Session {
@@ -527,6 +550,11 @@ impl Session {
             host: hostlock::HOST_BUILD.then(hostlock::Policy::default),
             read_only: Default::default(),
             trusted: false,
+            collab: Default::default(),
+            collab_held: Default::default(),
+            collab_wants: vec![],
+            collab_base: Default::default(),
+            collab_failed: vec![],
         }
     }
     /// Locks the session to its PPM host: only classified commands run, see [`hostlock`]. There
@@ -655,7 +683,12 @@ impl Session {
         if self.depth == 0 && !self.trusted && ((self.read_only() && !readonly::permits(id)) || !hostlock::permits(self.host.as_ref(), id, params)) {
             return Err(EngineError::HostLocked(id.into()));
         }
-        self.guarded(id, |s| s.execute_unguarded(id, params))
+        let r = self.guarded(id, |s| s.execute_unguarded(id, params));
+        // `text.compose` with an empty preedit ends a composition without `end_composition`.
+        if self.depth == 0 {
+            self.collab_flush();
+        }
+        r
     }
 
     fn execute_unguarded(&mut self, id: &str, params: &Value) -> Result<Value> {
@@ -692,6 +725,22 @@ impl Session {
                 return Err(e);
             }
         };
+        // Shared editing: the outermost command may only have changed what the parent granted.
+        if outer
+            && !self.collab.is_empty()
+            && let Some((uid, old, sel)) = before.as_ref()
+            && let Some(st) = self.active()
+            && st.uid == *uid
+            && !Arc::ptr_eq(old, &st.doc)
+            && let Some(v) = self.collab_check(*uid, old, &st.doc)
+        {
+            if let Some(st) = self.active_mut() {
+                st.doc = old.clone();
+                st.selection = sel.clone();
+                st.revision += 1;
+            }
+            return Err(self.collab_refused(&v));
+        }
         if let Some(st) = self.active_mut() {
             clamp_selection(st);
         }
@@ -724,10 +773,17 @@ impl Session {
             return Err(EngineError::HostLocked("edit".into()));
         }
         let st = self.doc_mut()?;
+        let (st_uid, old_doc) = (st.uid, st.doc.clone());
         let mut doc = (*st.doc).clone();
         let mut sel = st.selection.clone();
         let r = f(&mut doc, &mut sel)?;
         connect::reroute(&mut doc, &sel);
+        if self.depth == 0
+            && let Some(v) = self.collab_check(st_uid, &old_doc, &doc)
+        {
+            return Err(self.collab_refused(&v));
+        }
+        let st = self.doc_mut()?;
         st.doc = Arc::new(doc);
         st.selection = sel;
         st.revision += 1;
@@ -742,6 +798,8 @@ impl Session {
         if !Arc::ptr_eq(&c.before, &st.doc) {
             push_undo(st, HistoryEntry { label: "Type Text".into(), doc: c.before, selection: c.before_selection });
         }
+        // Remote changes that waited for the composition go in now.
+        self.collab_flush();
     }
 
     /// Change only the selection (no undo step).

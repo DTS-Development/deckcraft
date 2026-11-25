@@ -92,6 +92,8 @@ const MAX_ID_BYTES: usize = 200;
 
 /// Most byte and font requests waiting for the next frame; more are dropped.
 const MAX_PENDING_REQUESTS: usize = 16;
+/// Most `collab-*` messages kept while the presentation is still opening (a room sends a reset first, then single changes).
+const MAX_PENDING_COLLAB: usize = 4096;
 
 /// Most fonts taken from one `add-fonts` message; the rest count as failed.
 const MAX_FONTS_PER_MESSAGE: usize = 64;
@@ -138,7 +140,11 @@ pub struct Bridge {
     parent: web_sys::Window,
     origin: String,
     /// Files from the parent not yet handed to the app: `(name, bytes)`.
-    opened: Rc<RefCell<Vec<(String, Vec<u8>, Vec<(String, bool)>, ViewOptions)>>>,
+    opened: Rc<RefCell<Vec<(String, Vec<u8>, Vec<(String, bool)>, ViewOptions, bool, bool)>>>,
+    /// `collab-*` messages from the parent, not yet handled (they wait for the presentation to open).
+    collab_in: Rc<RefCell<Vec<serde_json::Value>>>,
+    /// The shared-editing state of the presentation opened with `collab`; none for an ordinary one.
+    shared: Rc<RefCell<Option<crate::collab_glue::Shared>>>,
     /// Tables from the parent not yet inserted.
     tables: Rc<RefCell<Vec<TableRequest>>>,
     /// Jumps from the parent not yet made.
@@ -175,6 +181,8 @@ impl Bridge {
             parent,
             origin,
             opened: Rc::default(),
+            collab_in: Rc::default(),
+            shared: Rc::default(),
             tables: Rc::default(),
             gotos: Rc::default(),
             saved: Rc::default(),
@@ -222,11 +230,52 @@ impl Bridge {
 
     /// Before each pass: files from the parent open as if picked with File › Open.
     pub fn deliver(&self, app: &mut SlideApp, inbox: &Inbox) {
-        for (name, bytes, overrides, view) in std::mem::take(&mut *self.opened.borrow_mut()) {
+        for (name, bytes, overrides, view, collab, cursors) in std::mem::take(&mut *self.opened.borrow_mut()) {
             app.session.set_policy(&overrides);
             // The options take hold when the presentation has opened.
-            let id = app.begin_host_open(view);
+            let id = if collab { app.begin_shared_open(view) } else { app.begin_host_open(view) };
+            // A new presentation starts a new link; messages of the last one are no use to it.
+            *self.shared.borrow_mut() = collab.then(|| crate::collab_glue::Shared::new().with_cursors(cursors));
+            app.remote_cursors.clear();
+            self.collab_in.borrow_mut().clear();
             inbox.lock().unwrap_or_else(|e| e.into_inner()).push(InboxEvent::File(InboxFile { id, name, bytes }));
+        }
+    }
+
+    /// Before each pass: `collab-*` messages go to the shared presentation once it has opened.
+    pub fn deliver_collab(&self, app: &mut SlideApp) {
+        if self.shared.borrow().is_none() || !self.opened.borrow().is_empty() || app.opening_file() || !app.opened_ok() {
+            return;
+        }
+        let messages = std::mem::take(&mut *self.collab_in.borrow_mut());
+        if let Some(shared) = self.shared.borrow_mut().as_mut() {
+            for m in &messages {
+                let out = shared.on_message(&mut app.session, m);
+                self.collab_out(app, out);
+            }
+        }
+    }
+
+    /// After each pass: what the user changed or asked for in the shared presentation goes to the parent.
+    fn pump_collab(&self, app: &mut SlideApp) {
+        if let Some(shared) = self.shared.borrow_mut().as_mut() {
+            let out = shared.pump(&mut app.session);
+            self.collab_out(app, out);
+        }
+    }
+
+    fn collab_out(&self, app: &mut SlideApp, out: crate::collab_glue::Out) {
+        for m in &out.send {
+            let posted = js_sys::JSON::parse(&m.to_string()).is_ok_and(|v| self.parent.post_message(&v, &self.origin).is_ok());
+            if !posted {
+                log::error!("couldn't send a shared-editing message to the page");
+            }
+        }
+        for note in out.notes {
+            app.notify(note);
+        }
+        if let Some(list) = out.cursors {
+            app.remote_cursors = list;
         }
     }
 
@@ -337,6 +386,7 @@ impl Bridge {
         for failure in std::mem::take(&mut *self.failures.borrow_mut()) {
             app.notify(failure);
         }
+        self.pump_collab(app);
         let saved = std::mem::take(&mut *self.saved.borrow_mut());
         if let Some(name) = saved.iter().rev().find(|name| is_presentation(name))
             && let Some(doc) = app.session.active_mut()
@@ -412,6 +462,7 @@ impl Bridge {
         let parent = self.parent.clone();
         let origin = self.origin.clone();
         let opened = self.opened.clone();
+        let collab_in = self.collab_in.clone();
         let tables = self.tables.clone();
         let gotos = self.gotos.clone();
         let byte_requests = self.byte_requests.clone();
@@ -426,7 +477,9 @@ impl Bridge {
                 Some("deckcraft:open") => {
                     let name = string(&data, "name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Presentation.pptx".to_string());
                     let Some(bytes) = bytes(&data) else { return };
-                    opened.borrow_mut().push((name, bytes, policy_overrides(&data), view_options(&data)));
+                    let collab = js_sys::Reflect::get(&data, &JsValue::from_str("collab")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+                    let cursors = js_sys::Reflect::get(&data, &JsValue::from_str("cursors")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+                    opened.borrow_mut().push((name, bytes, policy_overrides(&data), view_options(&data), collab, cursors));
                 }
                 Some("deckcraft:insert-table") => {
                     // Without a usable id there is nobody to answer.
@@ -463,6 +516,20 @@ impl Bridge {
                     let Some(id) = string(&data, "id").filter(|id| !id.is_empty() && id.len() <= MAX_ID_BYTES) else { return };
                     if fonts.borrow().len() < MAX_PENDING_REQUESTS {
                         fonts.borrow_mut().push(FontRequest { id, fonts: font_entries(&data, &installed.borrow()) });
+                    }
+                }
+                Some(t) if t.starts_with("deckcraft:collab-") => {
+                    // Plain JSON by the wire contract; anything else is dropped.
+                    let Some(m) = js_sys::JSON::stringify(&data).ok().and_then(|s| s.as_string()).and_then(|s| serde_json::from_str(&s).ok()) else { return };
+                    let mut queue = collab_in.borrow_mut();
+                    // Only the latest list of places matters: it replaces one still waiting, so a stream of them never crowds out a reset or a change.
+                    let places = |m: &serde_json::Value| m.get("type").and_then(|t| t.as_str()) == Some("deckcraft:collab-cursors");
+                    if places(&m)
+                        && let Some(old) = queue.iter_mut().find(|q| places(q))
+                    {
+                        *old = m;
+                    } else if queue.len() < MAX_PENDING_COLLAB {
+                        queue.push(m);
                     }
                 }
                 _ => return,

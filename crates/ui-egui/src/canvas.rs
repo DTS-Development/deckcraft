@@ -262,6 +262,7 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     pointer(app, ui, &resp, xf);
     if !app.anim_preview_active() {
         overlays(app, ui, &painter, xf, &t);
+        remote_selections(app, ui, &painter, xf);
         ime_output(app, ui, xf);
         media_bar(app, ui, xf);
         gif_buttons(app, ui, xf, &gifs);
@@ -754,7 +755,7 @@ fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf) {
     };
     // A read-only slide refuses a drag every frame, quietly (like the lock's refusals).
     if let Err(e) = r
-        && !matches!(e, deckcraft_engine::EngineError::HostLocked(_))
+        && !e.is_quiet_refusal()
     {
         app.set_status(e.to_string());
     }
@@ -799,6 +800,21 @@ fn poly(p: &egui::Painter, pts: [Pos2; 4], stroke: Stroke) {
     for i in 0..4 {
         p.line_segment([pts[i], pts[(i + 1) % 4]], stroke);
     }
+}
+
+/// Outlines and name tags on the shapes the other people of a shared presentation have selected.
+fn remote_selections(app: &SlideApp, ui: &Ui, painter: &egui::Painter, xf: Xf) {
+    if app.remote_cursors.is_empty() {
+        return;
+    }
+    let Some(st) = app.session.active().filter(|d| d.selection.target == Target::Slides) else { return };
+    let Some(slide) = st.current_slide() else { return };
+    crate::remote_cursors::paint_on_slide(painter, ui.clip_rect(), &app.remote_cursors, slide.id, |id| {
+        let sh = st.shape(id)?;
+        let x = deckcraft_engine::cmd::xfrm_of(&st.doc, &st.selection, sh);
+        let a = x.affine();
+        Some([Point::new(0.0, 0.0), Point::new(x.w, 0.0), Point::new(x.w, x.h), Point::new(0.0, x.h)].map(|q| xf.to_screen(a * q)))
+    });
 }
 
 fn overlays(app: &mut SlideApp, ui: &Ui, painter: &egui::Painter, xf: Xf, t: &Tokens) {

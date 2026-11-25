@@ -25,6 +25,11 @@ mod clipboard_keys;
 // The start decision is plain logic, kept out of the wasm-only modules so it is tested natively.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod gate;
+// The shared-editing messages, likewise plain JSON logic.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod collab_wire;
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod collab_glue;
 #[cfg(target_arch = "wasm32")]
 mod host;
 #[cfg(target_arch = "wasm32")]
