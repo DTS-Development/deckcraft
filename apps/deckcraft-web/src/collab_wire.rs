@@ -70,6 +70,7 @@ fn items<'a>(m: &'a Value, key: &str) -> &'a [Value] {
 }
 
 impl Link {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }

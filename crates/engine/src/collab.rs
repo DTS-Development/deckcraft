@@ -112,7 +112,7 @@ pub enum Remote {
     /// Slide `id` as it is in the sender's presentation.
     Slide { id: SlideId, from: Arc<Presentation> },
     /// The slide list: ids in order; the ones missing here come out of the sender's presentation.
-    Structure { order: Vec<SlideId>, from: Arc<Presentation> },
+    Structure { order: Vec<SlideId>, from: Vec<Arc<Presentation>> },
 }
 
 /// `p` with its slides in `order`: a slide it has keeps its own copy, one it lacks is taken from
@@ -248,11 +248,23 @@ impl Session {
     /// The changes made here since the last call (or since the gate went on): changed or new
     /// slides first, then the list when it differs, so a receiver has a slide before the list names
     /// it. Remote changes applied meanwhile are not among them. The gate keeps these inside what
-    /// the user holds. Empty when the gate is off.
+    /// the user holds. Empty when the gate is off. All of them count as sent; see
+    /// [`Session::collab_send_outgoing`] for sending that can fail.
     pub fn collab_take_outgoing(&mut self) -> Vec<Outgoing> {
+        let list = self.collab_outgoing();
+        if let (Some(uid), false) = (self.active().map(|d| d.uid), list.is_empty()) {
+            let now = self.active().map(|d| d.doc.clone());
+            if let Some(now) = now {
+                self.collab_base.insert(uid, now);
+            }
+        }
+        list
+    }
+
+    /// What differs from the server's copy, without counting it as sent.
+    fn collab_outgoing(&self) -> Vec<Outgoing> {
         let Some(st) = self.active() else { return vec![] };
-        let uid = st.uid;
-        let Some(base) = self.collab_base.get(&uid) else { return vec![] };
+        let Some(base) = self.collab_base.get(&st.uid) else { return vec![] };
         if Arc::ptr_eq(base, &st.doc) {
             return vec![];
         }
@@ -270,9 +282,55 @@ impl Session {
         if !same_list {
             out.push(Outgoing::Structure(st.doc.slides.iter().map(|s| s.id).collect()));
         }
-        let now = st.doc.clone();
-        self.collab_base.insert(uid, now);
         out
+    }
+
+    /// Hands each outgoing change to `send` (slides first). A slide `send` refuses (too large to
+    /// share) is put back to the server's copy, with no undo step; if it was a new slide, the whole
+    /// presentation goes back to it, since the list could not name a slide nobody has. Returns the
+    /// slides that were put back.
+    pub fn collab_send_outgoing(&mut self, send: &mut dyn FnMut(&Presentation, &Outgoing) -> bool) -> Vec<SlideId> {
+        let list = self.collab_outgoing();
+        let Some((uid, doc)) = self.active().map(|d| (d.uid, d.doc.clone())) else { return vec![] };
+        let Some(base) = self.collab_base.get(&uid).cloned() else { return vec![] };
+        let mut refused = vec![];
+        for item in &list {
+            if matches!(item, Outgoing::Slide(_)) && !send(&doc, item) {
+                if let Outgoing::Slide(id) = item {
+                    refused.push(*id);
+                }
+            }
+        }
+        let new_refused = refused.iter().any(|id| !base.slides.iter().any(|s| s.id == *id));
+        if !new_refused {
+            for item in list.iter().filter(|i| matches!(i, Outgoing::Structure(_))) {
+                send(&doc, item);
+            }
+        }
+        // What was sent is now the server's; what was refused is not.
+        let mut now = doc.clone();
+        for id in &refused {
+            if let Some(b) = base.slides.iter().find(|s| s.id == *id) {
+                now = patched(&now, b, &base);
+            }
+        }
+        if new_refused {
+            now = base.clone();
+        }
+        self.collab_base.insert(uid, now.clone());
+        // Put the refused ones back here too (the base is already what they go back to).
+        let order: Vec<SlideId> = now.slides.iter().map(|s| s.id).collect();
+        let mut failed = vec![];
+        if new_refused && self.apply_structure_now(&order, &[base.clone()]).is_err() {
+            failed.push(String::from("structure"));
+        }
+        for id in &refused {
+            if now.slides.iter().any(|s| s.id == *id) && self.apply_slide_now(*id, &now).is_err() {
+                failed.push(format!("slide {}", id.0));
+            }
+        }
+        self.collab_failed.extend(failed);
+        refused
     }
 
     /// The error for a refused edit; the region is remembered so the parent can be asked for its lock.
@@ -288,6 +346,21 @@ impl Session {
     /// request as locks (`collab-want`).
     pub fn collab_take_wants(&mut self) -> Vec<String> {
         std::mem::take(&mut self.collab_wants)
+    }
+
+    /// Puts slide `id` back to what the server has (`collab_base`), for an edit that could not be
+    /// sent (too large) or was refused. Not an edit: no undo step, and no stored state keeps the
+    /// refused version.
+    pub fn collab_revert_slide(&mut self, id: SlideId) -> Result<()> {
+        let uid = self.active().map(|d| d.uid).ok_or_else(|| EngineError::Other("no presentation".into()))?;
+        let base = self.collab_base.get(&uid).cloned().ok_or_else(|| EngineError::Other("not shared".into()))?;
+        // The slide is gone from the server's copy: nothing to put back here (the list decides).
+        if !base.slides.iter().any(|s| s.id == id) {
+            return Ok(());
+        }
+        self.apply_slide_now(id, &base)?;
+        // What was reverted is not a change to send: the server's copy is the base again.
+        Ok(())
     }
 
     /// How many remote changes are waiting for a composition to end.
@@ -332,15 +405,15 @@ impl Session {
     /// The slide list as someone else left it (`deck:structure`): slides added, removed and
     /// reordered to match `order`; the ones not here yet are taken out of `from`. Same rules as
     /// [`Session::collab_apply_slide`]; the selection stays on the same slide.
-    pub fn collab_apply_structure(&mut self, order: &[SlideId], from: &Presentation) -> Result<()> {
-        self.collab_apply(Remote::Structure { order: order.to_vec(), from: Arc::new(from.clone()) })
+    pub fn collab_apply_structure(&mut self, order: &[SlideId], from: &[&Presentation]) -> Result<()> {
+        self.collab_apply(Remote::Structure { order: order.to_vec(), from: from.iter().map(|p| Arc::new((*p).clone())).collect() })
     }
 
     /// The server's whole state (`collab-reset`) laid over this editor without undoing what it
     /// has sent and not had acknowledged: those edits are all inside what the user holds, so the
     /// slides held (and the slide list, when `structure` is held) are left as they are and the rest
     /// is written as in [`Session::collab_apply_slide`] and [`Session::collab_apply_structure`].
-    pub fn collab_reset(&mut self, order: &[SlideId], from: &Presentation) -> Result<()> {
+    pub fn collab_reset(&mut self, order: &[SlideId], from: &[&Presentation]) -> Result<()> {
         let gate = self.active().and_then(|d| self.collab.get(&d.uid)).cloned().unwrap_or_default();
         // With the list held, slides this editor added are not in `order` yet: keep the list.
         if !gate.structure {
@@ -348,8 +421,10 @@ impl Session {
         }
         let local: HashSet<SlideId> = self.active().map(|d| d.doc.slides.iter().map(|s| s.id).collect()).unwrap_or_default();
         // A slide that arrives with the list is already whole; only the ones here need a write.
-        for id in order.iter().filter(|id| local.contains(id) && !gate.held.contains(id) && from.slides.iter().any(|s| s.id == **id)) {
-            self.collab_apply_slide(*id, from)?;
+        for id in order.iter().filter(|id| local.contains(id) && !gate.held.contains(id)) {
+            if let Some(p) = from.iter().find(|p| p.slides.iter().any(|s| s.id == *id)) {
+                self.collab_apply_slide(*id, p)?;
+            }
         }
         Ok(())
     }
@@ -382,7 +457,7 @@ impl Session {
         Ok(())
     }
 
-    fn apply_structure_now(&mut self, order: &[SlideId], from: &Presentation) -> Result<()> {
+    fn apply_structure_now(&mut self, order: &[SlideId], from: &[Arc<Presentation>]) -> Result<()> {
         let st: &mut DocState = self.doc_mut()?;
         let mut seen = HashSet::new();
         if order.is_empty() || !order.iter().all(|id| seen.insert(*id)) {
@@ -393,13 +468,12 @@ impl Session {
         let mut fresh: HashMap<SlideId, Arc<Slide>> = HashMap::new();
         let missing: Vec<SlideId> = order.iter().copied().filter(|id| !doc.slides.iter().any(|s| s.id == *id)).collect();
         for id in &missing {
-            let src = from
-                .slides
+            let (origin, src) = from
                 .iter()
-                .find(|s| s.id == *id)
+                .find_map(|p| p.slides.iter().find(|s| s.id == *id).map(|s| (p, s)))
                 .ok_or_else(|| EngineError::Other(format!("slide {} is not in the sent presentation", id.0)))?;
             // Keep the id: it is the region key the other side knows it by.
-            let mut adopted = crate::compare::adopt(&mut doc, from, src, Some(*id))?;
+            let mut adopted = crate::compare::adopt(&mut doc, origin, src, Some(*id))?;
             adopted.id = *id;
             fresh.insert(*id, Arc::new(adopted));
         }
@@ -624,7 +698,7 @@ mod tests {
 
         go(&mut a, 2);
         let undo0 = a.active().unwrap().history.undo.len();
-        a.collab_apply_structure(&order, &b.active().unwrap().doc).unwrap();
+        a.collab_apply_structure(&order, &[&b.active().unwrap().doc]).unwrap();
         assert_eq!(ids(&a), order);
         assert!(text_of(&a, 2).contains("new from b"));
         assert_eq!(a.active().unwrap().history.undo.len(), undo0, "no undo step for a remote list");
@@ -646,10 +720,10 @@ mod tests {
         let b = peer(&a);
         let mut order = ids(&a);
         order.push(SlideId(987_654));
-        assert!(a.collab_apply_structure(&order, &b.active().unwrap().doc).is_err());
+        assert!(a.collab_apply_structure(&order, &[&b.active().unwrap().doc]).is_err());
         let o = ids(&a);
-        assert!(a.collab_apply_structure(&[o[0], o[0]], &b.active().unwrap().doc).is_err());
-        assert!(a.collab_apply_structure(&[], &b.active().unwrap().doc).is_err());
+        assert!(a.collab_apply_structure(&[o[0], o[0]], &[&b.active().unwrap().doc]).is_err());
+        assert!(a.collab_apply_structure(&[], &[&b.active().unwrap().doc]).is_err());
         assert_eq!(ids(&a), o, "a refused list changes nothing");
     }
 
@@ -703,7 +777,7 @@ mod tests {
         b.execute("slide.delete", &json!({})).unwrap();
         let (order, from) = (ids(&b), b.active().unwrap().doc.clone());
         compose_on(&mut a, 0);
-        a.collab_apply_structure(&order, &from).unwrap();
+        a.collab_apply_structure(&order, &[&from]).unwrap();
         assert_eq!(a.collab_held_len(), 1, "the composed slide is being deleted: wait");
         assert_eq!(ids(&a), old);
         // An empty preedit cancels; that path never calls end_composition.
@@ -733,7 +807,7 @@ mod tests {
             b.execute("text.exit", &json!({})).unwrap();
         }
         let undo0 = a.active().unwrap().history.undo.len();
-        a.collab_reset(&old, &b.active().unwrap().doc).unwrap();
+        a.collab_reset(&old, &[&b.active().unwrap().doc]).unwrap();
         assert!(text_of(&a, 1).contains("unacked"), "an unacknowledged edit survives a reset");
         assert!(text_of(&a, 0).contains("server0") && text_of(&a, 2).contains("server2"));
         assert_eq!(a.active().unwrap().history.undo.len(), undo0);
@@ -744,7 +818,7 @@ mod tests {
         a.execute("slide.new", &json!({})).unwrap();
         let mine = ids(&a);
         assert_eq!(mine.len(), 4);
-        a.collab_reset(&old, &b.active().unwrap().doc).unwrap();
+        a.collab_reset(&old, &[&b.active().unwrap().doc]).unwrap();
         assert_eq!(ids(&a), mine);
     }
 
@@ -768,7 +842,7 @@ mod tests {
         assert!(a.collab_take_outgoing().is_empty());
         go(&mut b, 0);
         b.execute("slide.delete", &json!({})).unwrap();
-        a.collab_apply_structure(&ids(&b), &b.active().unwrap().doc).unwrap();
+        a.collab_apply_structure(&ids(&b), &[&b.active().unwrap().doc]).unwrap();
         assert!(a.collab_take_outgoing().is_empty());
 
         // A new slide: the slide first, then the list.
@@ -777,6 +851,80 @@ mod tests {
         let now = ids(&a);
         let new = *now.iter().find(|id| !ids(&b).contains(id)).unwrap();
         assert_eq!(a.collab_take_outgoing(), vec![Outgoing::Slide(new), Outgoing::Structure(now)]);
+    }
+
+    #[test]
+    fn a_refused_slide_goes_back_to_the_servers_copy_without_undo() {
+        let mut a = deck();
+        a.collab_enable(true);
+        let old = ids(&a);
+        a.collab_set_locks([old[1]], false, false);
+        go(&mut a, 1);
+        let text0 = text_of(&a, 1);
+        a.execute("insert.textBox", &json!({})).unwrap();
+        a.execute("text.insert", &json!({"text": "too big"})).unwrap();
+        a.execute("text.exit", &json!({})).unwrap();
+        assert!(text_of(&a, 1).contains("too big"));
+        let undo0 = a.active().unwrap().history.undo.len();
+        a.collab_revert_slide(old[1]).unwrap();
+        assert_eq!(text_of(&a, 1), text0);
+        assert_eq!(a.active().unwrap().history.undo.len(), undo0);
+        // The undo states no longer carry the refused version either.
+        while a.active().unwrap().history.undo.last().is_some() {
+            a.execute("edit.undo", &json!({})).unwrap();
+        }
+        assert!(!text_of(&a, 1).contains("too big"));
+        assert!(a.collab_take_outgoing().is_empty(), "reverted: nothing left to send");
+    }
+
+    #[test]
+    fn a_slide_that_cannot_be_sent_goes_back_and_the_rest_still_goes() {
+        let mut a = deck();
+        a.collab_enable(true);
+        let old = ids(&a);
+        a.collab_set_locks([old[0], old[1]], false, false);
+        for i in [0, 1] {
+            go(&mut a, i);
+            a.execute("insert.textBox", &json!({})).unwrap();
+            a.execute("text.insert", &json!({"text": format!("edit{i}")})).unwrap();
+            a.execute("text.exit", &json!({})).unwrap();
+        }
+        let mut sent = vec![];
+        let refused = a.collab_send_outgoing(&mut |_, o| {
+            if *o == Outgoing::Slide(old[0]) {
+                return false;
+            }
+            sent.push(o.clone());
+            true
+        });
+        assert_eq!(refused, vec![old[0]]);
+        assert_eq!(sent, vec![Outgoing::Slide(old[1])]);
+        assert!(!text_of(&a, 0).contains("edit0"), "the refused slide is back to the server's copy");
+        assert!(text_of(&a, 1).contains("edit1"));
+        assert!(a.collab_take_outgoing().is_empty(), "nothing is left half-sent");
+        assert!(a.collab_take_failed().is_empty());
+    }
+
+    #[test]
+    fn a_new_slide_that_cannot_be_sent_takes_the_presentation_back_to_the_servers_copy() {
+        let mut a = deck();
+        a.collab_enable(true);
+        let old = ids(&a);
+        a.collab_set_locks([old[0]], true, false);
+        go(&mut a, 0);
+        a.execute("slide.new", &json!({})).unwrap();
+        assert_eq!(ids(&a).len(), 4);
+        let new = ids(&a).into_iter().find(|i| !old.contains(i)).unwrap();
+        let mut asked = vec![];
+        let refused = a.collab_send_outgoing(&mut |_, o| {
+            asked.push(o.clone());
+            *o != Outgoing::Slide(new)
+        });
+        assert_eq!(refused, vec![new]);
+        assert!(!asked.iter().any(|o| matches!(o, Outgoing::Structure(_))), "no list that names a slide nobody has");
+        assert_eq!(ids(&a), old);
+        assert!(a.collab_take_outgoing().is_empty());
+        assert!(a.collab_take_failed().is_empty());
     }
 
     #[test]

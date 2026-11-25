@@ -9,6 +9,7 @@
 
 pub mod cmd;
 pub mod collab;
+pub mod collab_codec;
 pub mod compare;
 pub mod connect;
 pub mod drawtable;

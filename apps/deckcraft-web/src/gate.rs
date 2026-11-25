@@ -37,7 +37,7 @@ pub fn blocks_page_default(ctrl: bool, meta: bool, alt: bool, key: &str, code: &
 
 /// The open options this build understands, sent with `deckcraft:ready` so the parent can tell an
 /// older build, which would open a presentation editable whatever it asked for, from this one.
-pub const SUPPORTED_OPTIONS: &[&str] = &["readOnly", "chrome", "zoomControls"];
+pub const SUPPORTED_OPTIONS: &[&str] = &["readOnly", "chrome", "zoomControls", "collab"];
 
 /// Why a request for the presentation's bytes is refused for a read-only app: nothing of it is
 /// saved. `check` and `preview` only read, so they are answered.
@@ -75,8 +75,8 @@ mod tests {
     }
 
     #[test]
-    fn the_supported_options_are_the_three() {
-        assert_eq!(SUPPORTED_OPTIONS, ["readOnly", "chrome", "zoomControls"]);
+    fn the_supported_options_are_the_four() {
+        assert_eq!(SUPPORTED_OPTIONS, ["readOnly", "chrome", "zoomControls", "collab"]);
     }
 
     #[test]

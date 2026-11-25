@@ -140,6 +140,8 @@ struct PendingFile {
     target: FileTarget,
     /// What the host asked of the presentation it sent; applied once it opened.
     view: Option<ViewOptions>,
+    /// The host opened it for shared editing (the `collab` open option): the slide-lock gate goes on with it.
+    shared: bool,
 }
 
 struct LocatedPlace {
@@ -735,6 +737,16 @@ impl SlideApp {
         let id = self.begin_external_file("open");
         if let Some(r) = self.pending_files.iter_mut().find(|r| r.id == id) {
             r.view = Some(view);
+        }
+        id
+    }
+
+    /// [`SlideApp::begin_host_open`] for a presentation opened for shared editing: once it has
+    /// opened, edits are held to the slides the parent grants (see the engine's `collab`).
+    pub fn begin_shared_open(&mut self, view: ViewOptions) -> u64 {
+        let id = self.begin_host_open(view);
+        if let Some(r) = self.pending_files.iter_mut().find(|r| r.id == id) {
+            r.shared = true;
         }
         id
     }
@@ -1600,7 +1612,7 @@ impl SlideApp {
     pub fn begin_external_file(&mut self, purpose: &str) -> u64 {
         let id = self.next_file_id;
         self.next_file_id = self.next_file_id.wrapping_add(1).max(1);
-        self.pending_files.push(PendingFile { id, purpose: purpose_of(purpose), target: self.capture_file_target(), view: None });
+        self.pending_files.push(PendingFile { id, purpose: purpose_of(purpose), target: self.capture_file_target(), view: None, shared: false });
         id
     }
 
@@ -1687,6 +1699,7 @@ impl SlideApp {
             // (no options means the defaults), one that failed leaves the previous ones alone.
             if result.is_ok() {
                 self.set_view(req.view.unwrap_or_default());
+                self.session.collab_enable(req.shared);
             }
         }
         match result {
