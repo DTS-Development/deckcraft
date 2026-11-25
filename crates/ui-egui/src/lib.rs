@@ -16,6 +16,7 @@ macro_rules! tl {
 pub mod animtimeline;
 pub mod backstage;
 pub mod canvas;
+pub mod remote_cursors;
 pub mod control;
 pub mod credits;
 pub mod dialogs;
@@ -530,6 +531,8 @@ pub struct SlideApp {
     pub slide_rect: Option<egui::Rect>,
     /// Where the canvas texture (the slide and the pasteboard drawn around it) is on screen.
     pub canvas_region: Option<egui::Rect>,
+    /// Where the other people of a shared presentation are (the parent's `collab-cursors`); empty otherwise.
+    pub remote_cursors: Vec<remote_cursors::RemoteCursor>,
     pub palette: Option<(String, usize)>,
     /// Integrated title bar (macOS traffic lights over our chrome).
     pub integrated_titlebar: bool,
@@ -634,6 +637,7 @@ impl SlideApp {
             canvas_scale: 1.0,
             slide_rect: None,
             canvas_region: None,
+            remote_cursors: vec![],
             palette: None,
             integrated_titlebar: false,
             backstage: None,

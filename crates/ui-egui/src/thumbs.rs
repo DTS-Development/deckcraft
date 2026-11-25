@@ -139,6 +139,11 @@ fn list(app: &mut SlideApp, ui: &mut Ui) {
                 egui::StrokeKind::Outside,
             );
         }
+        if let Some(id) = id
+            && let Some(who) = crate::remote_cursors::paint_on_thumb(p, img, &app.remote_cursors, id)
+        {
+            resp.clone().on_hover_text(who);
+        }
         if resp.clicked() {
             let (shift, cmd) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
             if let Some(id) = id {

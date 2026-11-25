@@ -10,6 +10,7 @@ use deckcraft_engine::collab::Outgoing;
 use deckcraft_engine::cmd::{base64_decode, base64_encode};
 use deckcraft_engine::collab_codec::{BlobStore, CodecError, MAX_BIG, content_hash, decode_order, decode_slide, encode_order, encode_slide, is_hash};
 use deckcraft_engine::model::{Presentation, SlideId};
+use deckcraft_ui_egui::remote_cursors::{self, RemoteCursor};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -28,6 +29,8 @@ pub struct Out {
     pub send: Vec<Value>,
     /// Lines for the status bar.
     pub notes: Vec<String>,
+    /// Where the other people are now (the whole list), when the parent just sent it.
+    pub cursors: Option<Vec<RemoteCursor>>,
 }
 
 #[derive(Default)]
@@ -46,11 +49,41 @@ pub struct Shared {
     /// Hashes asked of the parent, and the ones the server could not give.
     asked: HashSet<String>,
     gone: HashSet<String>,
+    /// Opened with `cursors`: this editor sends its place and draws the others'.
+    cursors: bool,
+    /// The place last sent (`None` = nothing sent yet): the slide and its selected shapes.
+    last_place: Option<Option<(SlideId, Vec<u32>)>>,
 }
 
 impl Shared {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// With the place of this editor sent and the others' drawn (the open option `cursors`).
+    pub fn with_cursors(mut self, on: bool) -> Self {
+        self.cursors = on;
+        self
+    }
+
+    /// `collab-cursor` when the slide or the selected shapes changed since the last one sent. The
+    /// place is the open slide in the slide view (none in a master or other page view).
+    fn place_msg(&mut self, s: &Session) -> Option<Value> {
+        let place = s.active().filter(|d| d.selection.target == deckcraft_engine::Target::Slides).and_then(|d| {
+            let id = d.current_slide()?.id;
+            // Only shapes the slide has, so the others never look for one that isn't there.
+            let shapes = d.selection.shapes.iter().filter(|sh| d.shape(**sh).is_some()).take(remote_cursors::MAX_SHAPES).map(|sh| sh.0).collect();
+            Some((id, shapes))
+        });
+        if self.last_place.as_ref() == Some(&place) {
+            return None;
+        }
+        let m = match &place {
+            Some((id, shapes)) => serde_json::json!({"type": "deckcraft:collab-cursor", "region": slide_key(*id), "pos": {"shapes": shapes}}),
+            None => serde_json::json!({"type": "deckcraft:collab-cursor", "region": null}),
+        };
+        self.last_place = Some(place);
+        Some(m)
     }
 
     fn stash(&mut self, id: SlideId, p: Presentation) {
@@ -162,6 +195,7 @@ impl Shared {
             Some("collab-apply") => self.on_apply(s, m, &mut out),
             Some("collab-blob") => self.on_blob(s, m, &mut out),
             Some("collab-blob-missing") => self.on_blob_missing(m, &mut out),
+            Some("collab-cursors") if self.cursors => out.cursors = Some(remote_cursors::parse(m)),
             _ => {}
         }
         out
@@ -296,6 +330,9 @@ impl Shared {
         });
         if !refused.is_empty() {
             out.notes.push(format!("{} slide(s) were taken back.", refused.len()));
+        }
+        if self.cursors {
+            out.send.extend(self.place_msg(s));
         }
         for failure in s.collab_take_failed() {
             out.notes.push(format!("Couldn't apply {failure}."));
@@ -544,5 +581,47 @@ mod tests {
         // The picture arriving later must not put the slide back to what it was.
         sb.on_message(&mut b, &json!({"type": "deckcraft:collab-blob", "hash": hash, "b64": base64_encode(&bytes)}));
         assert_eq!(b.active().unwrap().doc.slides[0].shapes.len(), shapes);
+    }
+
+    fn places(out: &Out) -> Vec<&Value> {
+        out.send.iter().filter(|m| m["type"] == "deckcraft:collab-cursor").collect()
+    }
+
+    #[test]
+    fn the_place_goes_out_when_the_slide_or_selection_changes() {
+        let (mut s, mut sh) = (deck(), Shared::new().with_cursors(true));
+        go(&mut s, 1);
+        let id = s.active().unwrap().doc.slides[1].id;
+        let first = sh.pump(&mut s);
+        let sent = places(&first);
+        assert_eq!(sent.len(), 1, "the first place is sent");
+        assert_eq!(sent[0]["region"], format!("slide:{}", id.0));
+        assert_eq!(sent[0]["pos"]["shapes"], json!([]));
+        assert!(places(&sh.pump(&mut s)).is_empty(), "the same place isn't sent twice");
+        go(&mut s, 0);
+        let id0 = s.active().unwrap().doc.slides[0].id;
+        assert_eq!(places(&sh.pump(&mut s))[0]["region"], format!("slide:{}", id0.0));
+    }
+
+    #[test]
+    fn no_place_is_sent_without_the_option() {
+        let (mut s, mut sh) = (deck(), Shared::new());
+        go(&mut s, 1);
+        assert!(places(&sh.pump(&mut s)).is_empty());
+        let m = json!({"type": "deckcraft:collab-cursors", "cursors": [{"conn": 1, "region": "slide:1", "name": "A", "color": "#ff0000", "role": "edit"}]});
+        assert!(sh.on_message(&mut s, &m).cursors.is_none(), "the others' places are ignored too");
+    }
+
+    #[test]
+    fn the_others_places_are_taken_whole() {
+        let (mut s, mut sh) = (deck(), Shared::new().with_cursors(true));
+        let m = json!({"type": "deckcraft:collab-cursors", "cursors": [
+            {"conn": 1, "region": "slide:1", "name": "A", "color": "#ff0000", "role": "edit", "pos": {"shapes": [2]}},
+            {"conn": 2, "region": "deck:structure", "name": "B", "color": "#00ff00", "role": "view"}]});
+        let got = sh.on_message(&mut s, &m).cursors.expect("a list");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "A");
+        let empty = json!({"type": "deckcraft:collab-cursors", "cursors": []});
+        assert_eq!(sh.on_message(&mut s, &empty).cursors, Some(vec![]), "an empty list clears the others");
     }
 }

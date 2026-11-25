@@ -140,7 +140,7 @@ pub struct Bridge {
     parent: web_sys::Window,
     origin: String,
     /// Files from the parent not yet handed to the app: `(name, bytes)`.
-    opened: Rc<RefCell<Vec<(String, Vec<u8>, Vec<(String, bool)>, ViewOptions, bool)>>>,
+    opened: Rc<RefCell<Vec<(String, Vec<u8>, Vec<(String, bool)>, ViewOptions, bool, bool)>>>,
     /// `collab-*` messages from the parent, not yet handled (they wait for the presentation to open).
     collab_in: Rc<RefCell<Vec<serde_json::Value>>>,
     /// The shared-editing state of the presentation opened with `collab`; none for an ordinary one.
@@ -230,12 +230,13 @@ impl Bridge {
 
     /// Before each pass: files from the parent open as if picked with File › Open.
     pub fn deliver(&self, app: &mut SlideApp, inbox: &Inbox) {
-        for (name, bytes, overrides, view, collab) in std::mem::take(&mut *self.opened.borrow_mut()) {
+        for (name, bytes, overrides, view, collab, cursors) in std::mem::take(&mut *self.opened.borrow_mut()) {
             app.session.set_policy(&overrides);
             // The options take hold when the presentation has opened.
             let id = if collab { app.begin_shared_open(view) } else { app.begin_host_open(view) };
             // A new presentation starts a new link; messages of the last one are no use to it.
-            *self.shared.borrow_mut() = collab.then(crate::collab_glue::Shared::new);
+            *self.shared.borrow_mut() = collab.then(|| crate::collab_glue::Shared::new().with_cursors(cursors));
+            app.remote_cursors.clear();
             self.collab_in.borrow_mut().clear();
             inbox.lock().unwrap_or_else(|e| e.into_inner()).push(InboxEvent::File(InboxFile { id, name, bytes }));
         }
@@ -272,6 +273,9 @@ impl Bridge {
         }
         for note in out.notes {
             app.notify(note);
+        }
+        if let Some(list) = out.cursors {
+            app.remote_cursors = list;
         }
     }
 
@@ -474,7 +478,8 @@ impl Bridge {
                     let name = string(&data, "name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Presentation.pptx".to_string());
                     let Some(bytes) = bytes(&data) else { return };
                     let collab = js_sys::Reflect::get(&data, &JsValue::from_str("collab")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
-                    opened.borrow_mut().push((name, bytes, policy_overrides(&data), view_options(&data), collab));
+                    let cursors = js_sys::Reflect::get(&data, &JsValue::from_str("cursors")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+                    opened.borrow_mut().push((name, bytes, policy_overrides(&data), view_options(&data), collab, cursors));
                 }
                 Some("deckcraft:insert-table") => {
                     // Without a usable id there is nobody to answer.
@@ -517,7 +522,13 @@ impl Bridge {
                     // Plain JSON by the wire contract; anything else is dropped.
                     let Some(m) = js_sys::JSON::stringify(&data).ok().and_then(|s| s.as_string()).and_then(|s| serde_json::from_str(&s).ok()) else { return };
                     let mut queue = collab_in.borrow_mut();
-                    if queue.len() < MAX_PENDING_COLLAB {
+                    // Only the latest list of places matters: it replaces one still waiting, so a stream of them never crowds out a reset or a change.
+                    let places = |m: &serde_json::Value| m.get("type").and_then(|t| t.as_str()) == Some("deckcraft:collab-cursors");
+                    if places(&m)
+                        && let Some(old) = queue.iter_mut().find(|q| places(q))
+                    {
+                        *old = m;
+                    } else if queue.len() < MAX_PENDING_COLLAB {
                         queue.push(m);
                     }
                 }

@@ -6,7 +6,9 @@
 //! and `collab-want | collab-release | collab-focus {region}`. Parent to editor:
 //! `collab-reset {regions, rev}`, `collab-apply {changes}`, `collab-ack {seq, rev, ver}`,
 //! `collab-reject {seq, region, reason, current?}`, `collab-locks {locks: [{region, mine, ..}]}`,
-//! `collab-role {role}`.
+//! `collab-role {role}`. With the open option `cursors` the places of people: editor to parent
+//! `collab-cursor {region: "slide:<id>" | null, pos?: {shapes: [id..]}}`, parent to editor
+//! `collab-cursors {cursors: [{conn, name, color, role, region, pos?}]}` (see `collab_glue`).
 
 use std::collections::{HashMap, HashSet};
 
