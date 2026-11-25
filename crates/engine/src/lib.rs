@@ -499,6 +499,12 @@ pub struct Session {
     trusted: bool,
     /// Presentations (by uid) shared with others and what the user may edit in each, see [`collab`].
     collab: std::collections::HashMap<u64, collab::Gate>,
+    /// Remote changes waiting for an input method's composition to end, by presentation uid.
+    collab_held: std::collections::HashMap<u64, Vec<collab::Remote>>,
+    /// What the server is known to have of each shared presentation (ours already sent, theirs already applied).
+    collab_base: std::collections::HashMap<u64, Arc<Presentation>>,
+    /// Remote changes that could not be applied once they were let through (see [`Session::collab_take_failed`]).
+    collab_failed: Vec<String>,
 }
 
 impl Default for Session {
@@ -534,6 +540,9 @@ impl Session {
             read_only: Default::default(),
             trusted: false,
             collab: Default::default(),
+            collab_held: Default::default(),
+            collab_base: Default::default(),
+            collab_failed: vec![],
         }
     }
     /// Locks the session to its PPM host: only classified commands run, see [`hostlock`]. There
@@ -662,7 +671,12 @@ impl Session {
         if self.depth == 0 && !self.trusted && ((self.read_only() && !readonly::permits(id)) || !hostlock::permits(self.host.as_ref(), id, params)) {
             return Err(EngineError::HostLocked(id.into()));
         }
-        self.guarded(id, |s| s.execute_unguarded(id, params))
+        let r = self.guarded(id, |s| s.execute_unguarded(id, params));
+        // `text.compose` with an empty preedit ends a composition without `end_composition`.
+        if self.depth == 0 {
+            self.collab_flush();
+        }
+        r
     }
 
     fn execute_unguarded(&mut self, id: &str, params: &Value) -> Result<Value> {
@@ -772,6 +786,8 @@ impl Session {
         if !Arc::ptr_eq(&c.before, &st.doc) {
             push_undo(st, HistoryEntry { label: "Type Text".into(), doc: c.before, selection: c.before_selection });
         }
+        // Remote changes that waited for the composition go in now.
+        self.collab_flush();
     }
 
     /// Change only the selection (no undo step).
