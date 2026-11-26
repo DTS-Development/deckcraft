@@ -604,6 +604,21 @@ mod tests {
     }
 
     #[test]
+    fn the_selected_shapes_ride_along_and_unknown_ones_are_dropped() {
+        let (mut s, mut sh) = (deck(), Shared::new().with_cursors(true));
+        go(&mut s, 0);
+        s.execute("shape.add", &json!({"kind": "rect"})).ok();
+        let real = s.active().unwrap().doc.slides[0].shapes.first().map(|x| x.id);
+        let d = s.active_mut().unwrap();
+        d.selection.shapes = real.into_iter().chain([deckcraft_engine::model::ShapeId(987_654)]).collect();
+        let sent = sh.pump(&mut s);
+        let got: Vec<u64> = places(&sent)[0]["pos"]["shapes"].as_array().unwrap().iter().filter_map(|v| v.as_u64()).collect();
+        assert!(real.is_some(), "the slide has a shape");
+        assert_eq!(got.len(), 1, "only the shape the slide has");
+        assert!(!got.contains(&987_654));
+    }
+
+    #[test]
     fn no_place_is_sent_without_the_option() {
         let (mut s, mut sh) = (deck(), Shared::new());
         go(&mut s, 1);
